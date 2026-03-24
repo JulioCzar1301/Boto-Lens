@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+pydantic          # validação de dados (já vem com fastapi, mas bom fixar)
+python-dotenv     # carregar variáveis de ambiente do .env
+httpx             # fazer requisições HTTP

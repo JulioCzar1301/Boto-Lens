@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    container_name: fastapi_app
+    restart: always
+    ports:
+      - "8001:8001"
+    environment:
+      - VLLM_URL=http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
