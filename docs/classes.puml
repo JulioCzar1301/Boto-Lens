@@ -1,0 +1,107 @@
+@startuml classes
+skinparam backgroundColor #FAFAFA
+skinparam classBackgroundColor #E1F5FE
+skinparam classBorderColor #0277BD
+
+' Classes de domínio
+class BBox {
+  -x1: float
+  -y1: float
+  -x2: float
+  -y2: float
+  +area(): float
+  +iou(other: BBox): float
+}
+
+class DetectedObject {
+  -label: str
+  -score: float
+  -bbox: BBox
+  -source: str
+  -yoloe_conf: Optional[float]
+}
+
+DetectedObject *-- BBox : contém
+
+' Schemas Pydantic
+class Prompt {
+  +image: str
+}
+
+class PromptSys {
+  +image: str
+  +prompt: str
+}
+
+' Services
+class FastAPI {
+  +post(route, body): dict
+  +get(route): dict
+}
+
+class QwenService {
+  +parse_qwen_response(response: dict): List[DetectedObject]
+  -_extract_json(raw: str): dict
+  -_validate_objects(data: dict): List[DetectedObject]
+}
+
+class YoloeService {
+  +run_yoloe(img: Image): List[DetectedObject]
+  +get_yoloe(): YOLOE
+  -_normalize_bbox(xyxy, width, height): BBox
+}
+
+class FusionService {
+  +fuse_by_iou(qwen: List, yoloe: List): List[DetectedObject]
+  +serialize_detections(objects: List, too_many: bool): dict
+  -_match_by_iou(qobj, yoloe_objects): Tuple
+}
+
+class ImageUtils {
+  +resize_base64_image(b64: str): str
+  +b64_to_pil(b64: str): Image
+  -_decode_b64(b64: str): bytes
+}
+
+' Endpoints (métodos da API)
+class DetectionEndpoint {
+  +detection(body: Prompt): dict
+  +detection_sys(body: PromptSys): dict
+  +detection_fused(body: Prompt): dict
+  +health(): dict
+}
+
+' Relações
+FastAPI <|-- DetectionEndpoint : implementa
+
+DetectionEndpoint --> Prompt : recebe
+DetectionEndpoint --> PromptSys : recebe
+DetectionEndpoint --> ImageUtils : utiliza
+
+DetectionEndpoint --> QwenService : utiliza
+DetectionEndpoint --> YoloeService : utiliza
+DetectionEndpoint --> FusionService : utiliza
+
+QwenService --> DetectedObject : produz
+YoloeService --> DetectedObject : produz
+FusionService --> DetectedObject : consome/produz
+
+ImageUtils --> DetectedObject : suporta processamento
+
+note bottom of BBox
+  Coordenadas normalizadas
+  no intervalo [0, 1]
+end note
+
+note bottom of FusionService
+  Combina detecções via IoU
+  label/score vem do Qwen
+  bbox vem do YOLOE
+end note
+
+note bottom of YoloeService
+  Wrapper para ultralytics
+  Singleton pattern
+end note
+
+@enduml

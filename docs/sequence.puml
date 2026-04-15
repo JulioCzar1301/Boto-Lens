@@ -1,0 +1,75 @@
+@startuml sequence
+title Fluxo de Detecção com Fusão: POST /detection/fused
+
+actor Client as C
+participant "FastAPI\nAPI Server" as API
+participant "Image Utils\nUtils" as IMG
+participant "HTTP Client\nAsyncClient" as HTTP
+participant "vLLM Server\nQwen" as QWEN_SRV
+participant "YOLOE Service\nServices" as YOLOE
+participant "Fusion Service\nServices" as FUSION
+participant "Response\nSerialization" as SER
+
+C ->> API: POST /detection/fused
+activate API
+
+API ->> IMG: resize_base64_image(image)
+activate IMG
+note over IMG: Redimensiona se\nnecessário (max 1024px)
+IMG -->> API: image_b64_resized
+deactivate IMG
+
+API ->> IMG: b64_to_pil(image_b64)
+activate IMG
+note over IMG: Converte para\nPIL Image
+IMG -->> API: img (PIL)
+deactivate IMG
+
+API ->> API: Inicia chamadas paralelas
+par Execução Paralela
+    API ->> HTTP: POST /v1/chat/completions (Qwen + image)
+    HTTP ->> QWEN_SRV: Processa imagem
+    QWEN_SRV -->> HTTP: choices: content JSON
+    HTTP -->> API: vllm_response
+else
+    API ->> YOLOE: run_yoloe(img)
+    YOLOE -->> API: yoloe_objects: List of DetectedObject
+end
+note over API: Qwen processa imagem\nYOLOE executa detecção\nAmbos executam em paralelo
+
+API ->> API: parse_qwen_response(vllm_response)
+note over API: Extrai JSON e valida\nobservações do Qwen
+API ->> API: qwen_objects: List of DetectedObject
+
+API ->> FUSION: fuse_by_iou(qwen_objects, yoloe_objects)
+activate FUSION
+note over FUSION: IoU threshold = 0.15\nPara cada Qwen object:\nbusca melhor match YOLOE
+
+loop Para cada qwen_object
+    FUSION ->> FUSION: calcula IoU com cada yoloe_bbox
+    alt IoU >= 0.15 e nao usado
+        FUSION ->> FUSION: cria objeto fusionado\nlabel+score Qwen + bbox YOLOE
+    else IoU < 0.15
+        FUSION ->> FUSION: mantem objeto Qwen
+    end
+end
+
+FUSION -->> API: fused_objects: List of DetectedObject
+deactivate FUSION
+
+API ->> SER: serialize_detections(fused_objects)
+activate SER
+note over SER: Formata para JSON\nresponse da API
+SER -->> API: objects e too_many_objects: false
+deactivate SER
+
+API -->> C: HTTP 200
+deactivate API
+
+note over C, SER
+  Total: Qwen + YOLOE em paralelo
+  Fusao por IoU combina resultado
+  Resposta: objetos com melhor confianca
+end note
+
+@enduml
