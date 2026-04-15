@@ -1,10 +1,10 @@
-FROM python:3.11-slim
+FROM ultralytics/ultralytics:latest
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Só instala os pacotes LEVES da sua API
+RUN pip install --timeout=300 fastapi uvicorn[standard] httpx pydantic python-dotenv
 
-COPY api/ .
+COPY app/ .
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]

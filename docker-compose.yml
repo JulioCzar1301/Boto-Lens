@@ -1,4 +1,35 @@
 services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    runtime: nvidia
+      - "8000:8000"
+    ipc: host
+    command:
+      - "--model"
+      - "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit"
+      - "--dtype"
+      - "bfloat16"
+      - "--max-model-len"
+      - "4096"
+      - "--gpu-memory-utilization"
+      - "0.95"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    networks:
+      - app-network          # ← adicionado
+
   api:
     build: .
     container_name: fastapi_app
@@ -6,9 +37,10 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - VLLM_URL=http://host.docker.internal:8000
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - VLLM_URL=http://vllm:8000   # ← nome do serviço, não host.docker.internal
+    depends_on:                      # ← adicionado
+      vllm:
+        condition: service_healthy
     networks:
       - app-network
 
