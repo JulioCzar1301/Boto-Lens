@@ -113,8 +113,13 @@ async def detection_sys(body: PromptSys) -> dict:
     Returns:
         dict: Resposta do vLLM com o prompt informado.
     """
+    
+    image_b64 = resize_base64_image(body.image)
     async with httpx.AsyncClient(timeout=120.0) as client:
-        return await _call_vllm(client, body.image, body.prompt)
+        qwen_response = await _call_vllm(client, image_b64, body.prompt)
+        qwen_objects = parse_qwen_response(qwen_response)
+        return serialize_detections(qwen_objects, too_many=False)
+
 
 
 @app.post("/detection/fused")

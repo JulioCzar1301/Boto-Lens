@@ -1,0 +1,76 @@
+@startuml architecture
+!define EXTERNAL #FFE4E1
+!define INTERNAL #E1F5FE
+!define SERVICE #FFF9E6
+
+skinparam backgroundColor #FAFAFA
+skinparam componentBackgroundColor INTERNAL
+skinparam component {
+  BorderColor #0277BD
+  BackgroundColor INTERNAL
+}
+
+package "Aplicação FastAPI" {
+  component "API Server\n(main.py)" as API
+  
+  package "Services" {
+    component "Qwen Service\n(parse_qwen_response)" as QwenSvc
+    component "YOLOE Service\n(run_yoloe)" as YoloeSvc
+    component "Fusion Service\n(fuse_by_iou)" as FusionSvc
+  }
+  
+  package "Utils" {
+    component "Image Utils\n(resize, convert)" as ImageUtils
+  }
+  
+  package "Models" {
+    component "BBox\nDetectedObject" as ModelComponents
+  }
+}
+
+package "Serviços Externos" {
+  component "vLLM Server\nQwen3-VL-8B" as VLLM <<EXTERNAL>>
+  component "YOLOE Model\n(yoloe-11l-seg-pf.pt)" as YoloeModel <<EXTERNAL>>
+}
+
+package "Cliente" {
+  actor "Cliente" as Client
+}
+
+' Conexões
+Client --> API: POST /detection/fused\n(image: base64)
+
+API --> ImageUtils: resize_base64_image\nb64_to_pil
+ImageUtils --> API: image processada
+
+API --> QwenSvc: parse_qwen_response
+API --> YoloeSvc: run_yoloe
+
+QwenSvc --> VLLM: POST /v1/chat/completions\n(image, system_prompt)
+VLLM --> QwenSvc: JSON com objetos
+
+YoloeSvc --> YoloeModel: predict(image)
+YoloeModel --> YoloeSvc: detecções com scores
+
+QwenSvc --> ModelComponents: cria DetectedObject
+YoloeSvc --> ModelComponents: cria DetectedObject
+
+API --> FusionSvc: fuse_by_iou\n(qwen_objects, yoloe_objects)
+FusionSvc --> ModelComponents: calcula IoU entre BBoxes
+FusionSvc --> API: objetos fusionados
+
+API --> Client: JSON response\n(fused objects)
+
+note right of API
+  Executa Qwen e YOLOE
+  em paralelo com asyncio
+  para melhor performance
+end note
+
+note right of FusionSvc
+  IoU threshold = 0.15
+  Usa labels do Qwen +
+  bboxes do YOLOE
+end note
+
+@enduml
