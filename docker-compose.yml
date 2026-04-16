@@ -3,13 +3,14 @@ services:
     image: vllm/vllm-openai:latest
     container_name: vllm-server
     runtime: nvidia
+    ports:
       - "8000:8000"
     ipc: host
     command:
       - "--model"
       - "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit"
       - "--dtype"
-      - "bfloat16"
+      - "half"
       - "--max-model-len"
       - "4096"
       - "--gpu-memory-utilization"
@@ -22,11 +23,11 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]  # ← mudado para /v1/models
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 120s
+      retries: 10
+      start_period: 300s
     networks:
       - app-network          # ← adicionado
 

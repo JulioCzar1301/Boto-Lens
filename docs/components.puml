@@ -1,0 +1,139 @@
+@startuml Components
+!theme plain
+skinparam componentStyle uml2
+skinparam component {
+    BackgroundColor #e1f5ff
+    BorderColor #01579b
+    FontColor #000000
+}
+skinparam interface {
+    BackgroundColor #fff3e0
+    BorderColor #e65100
+}
+skinparam note {
+    BackgroundColor #f3e5f5
+    BorderColor #4a148c
+}
+
+' ════════════════════════════════════════════════
+' CAMADA: Cliente e HTTP
+' ════════════════════════════════════════════════
+component "HTTP Client" as Client {
+}
+
+' ════════════════════════════════════════════════
+' CAMADA: FastAPI Application
+' ════════════════════════════════════════════════
+component "FastAPI App" as App {
+    component "Endpoint: /detection" as Ep1
+    component "Endpoint: /detection/sys_prompt" as Ep2
+    component "Endpoint: /detection/fused" as Ep3
+    component "Endpoint: /health" as Ep4
+    
+    note right of Ep1
+        Detecção apenas com Qwen
+        (resposta bruta do vLLM)
+    end note
+    
+    note right of Ep2
+        Detecção com prompt
+        customizado do Qwen
+    end note
+    
+    note right of Ep3
+        Fusão de resultados
+        Qwen + YOLOE via IoU
+    end note
+}
+
+' ════════════════════════════════════════════════
+' CAMADA: Serviços de Detecção e Processamento
+' ════════════════════════════════════════════════
+component "Services Layer" as Services {
+    component "Qwen Service\n(parse_qwen_response)" as QwenSvc
+    component "YOLOE Service\n(run_yoloe)" as YOLOESvc
+    component "Fusion Service\n(fuse_by_iou)" as FusionSvc
+}
+
+' ════════════════════════════════════════════════
+' CAMADA: Dados e Utilidades
+' ════════════════════════════════════════════════
+component "Data & Utils Layer" as DataUtils {
+    component "Models\n(DetectedObject, BBox)" as Models
+    component "Image Utils\n(resize_base64_image)" as ImgUtils
+    component "System Instruction" as SysInst
+}
+
+' ════════════════════════════════════════════════
+' CAMADA: Dependências Externas
+' ════════════════════════════════════════════════
+component "External Services" as External {
+    component "vLLM Server\n(Qwen 3-VL-8B)" as vLLM
+    component "YOLOE Model\n(Local Inference)" as YOLOEModel
+    component "PIL/Pillow\n(Image Processing)" as PIL
+}
+
+' ════════════════════════════════════════════════
+' RELAÇÕES E DEPENDÊNCIAS
+' ════════════════════════════════════════════════
+
+' Cliente → API
+Client --> Ep1
+Client --> Ep2
+Client --> Ep3
+
+' Endpoints → Serviços
+Ep1 --> QwenSvc
+Ep2 --> QwenSvc
+Ep3 --> QwenSvc
+Ep3 --> YOLOESvc
+Ep3 --> FusionSvc
+
+' Serviços → Modelos
+QwenSvc --> Models
+YOLOESvc --> Models
+FusionSvc --> Models
+
+' Serviços → Utils
+QwenSvc --> ImgUtils
+YOLOESvc --> ImgUtils
+QwenSvc --> SysInst
+QwenSvc --> vLLM
+YOLOESvc --> PIL
+YOLOESvc --> YOLOEModel
+
+' Serviços → Dados
+App --> ImgUtils
+App --> Models
+
+' Utils → Externas
+ImgUtils --> PIL
+
+' Fusão → Modelos
+FusionSvc --> Models
+
+' ════════════════════════════════════════════════
+' ANOTAÇÕES EXPLICATIVAS
+' ════════════════════════════════════════════════
+note bottom of Services
+    Responsáveis por:
+    • Parse de respostas Qwen
+    • Execução do YOLOE
+    • Fusão via IoU (Intersection over Union)
+end note
+
+note bottom of DataUtils
+    Estruturas e configurações:
+    • DetectedObject com BBox
+    • Processamento de imagens em base64
+    • Prompts do sistema
+end note
+
+note bottom of External
+    Dependências externas:
+    • vLLM rodando em container
+    • Modelo YOLOE local
+    • PIL para processamento
+end note
+
+@enduml

@@ -118,6 +118,7 @@ async def detection_sys(body: PromptSys) -> dict:
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, body.prompt)
         qwen_objects = parse_qwen_response(qwen_response)
+        print("Resposta do Qwen com prompt customizado:", qwen_objects)
         return serialize_detections(qwen_objects, too_many=False)
 
 

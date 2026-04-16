@@ -1,76 +1,80 @@
-@startuml architecture
-!define EXTERNAL #FFE4E1
-!define INTERNAL #E1F5FE
-!define SERVICE #FFF9E6
+@startuml
+!theme plain
+left to right direction
 
+skinparam componentStyle rectangle
 skinparam backgroundColor #FAFAFA
-skinparam componentBackgroundColor INTERNAL
-skinparam component {
-  BorderColor #0277BD
-  BackgroundColor INTERNAL
-}
+skinparam ArrowColor #2C3E50
+skinparam ActorBorderColor #2C3E50
+skinparam ActorBackgroundColor #ECF0F1
 
-package "Aplicação FastAPI" {
-  component "API Server\n(main.py)" as API
-  
-  package "Services" {
-    component "Qwen Service\n(parse_qwen_response)" as QwenSvc
-    component "YOLOE Service\n(run_yoloe)" as YoloeSvc
-    component "Fusion Service\n(fuse_by_iou)" as FusionSvc
-  }
-  
-  package "Utils" {
-    component "Image Utils\n(resize, convert)" as ImageUtils
-  }
-  
-  package "Models" {
-    component "BBox\nDetectedObject" as ModelComponents
-  }
-}
+title Arquitetura Conceitual - Processamento com Qwen3-VL-8B
 
-package "Serviços Externos" {
-  component "vLLM Server\nQwen3-VL-8B" as VLLM <<EXTERNAL>>
-  component "YOLOE Model\n(yoloe-11l-seg-pf.pt)" as YoloeModel <<EXTERNAL>>
-}
+actor "Usuário" as User
 
-package "Cliente" {
-  actor "Cliente" as Client
-}
+component "Front-end Servidor" as Frontend
+note right of Frontend : Conversão para Base64
 
-' Conexões
-Client --> API: POST /detection/fused\n(image: base64)
 
-API --> ImageUtils: resize_base64_image\nb64_to_pil
-ImageUtils --> API: image processada
+component "Cloudflare Túnel" as Tunnel
+note right of Tunnel : Conexão Segura
 
-API --> QwenSvc: parse_qwen_response
-API --> YoloeSvc: run_yoloe
+component "FastAPI + Uvicorn" as API
+note right of API : Endpoints e Roteamento
 
-QwenSvc --> VLLM: POST /v1/chat/completions\n(image, system_prompt)
-VLLM --> QwenSvc: JSON com objetos
+component "Back-end AWS" as Backend
+note right of Backend : Lógica de Negócio e Validação
 
-YoloeSvc --> YoloeModel: predict(image)
-YoloeModel --> YoloeSvc: detecções com scores
+component "vLLM Inferência" as Inference
+note right of Inference : Execução do Modelo
 
-QwenSvc --> ModelComponents: cria DetectedObject
-YoloeSvc --> ModelComponents: cria DetectedObject
+database "Qwen3-VL-8B" as Model
+note right of Model : Modelo de Visão-Idioma
 
-API --> FusionSvc: fuse_by_iou\n(qwen_objects, yoloe_objects)
-FusionSvc --> ModelComponents: calcula IoU entre BBoxes
-FusionSvc --> API: objetos fusionados
+' ===== FORÇAR ORDEM DE ESQUERDA PARA DIREITA =====
+User -[hidden]right-> Frontend
+Frontend -[hidden]right-> Backend
+Backend -[hidden]right-> Tunnel
+Tunnel -[hidden]right-> API
+API -[hidden]right-> Inference
+Inference -[hidden]right-> Model
 
-API --> Client: JSON response\n(fused objects)
+' ===== FLUXO PRINCIPAL =====
+User --> Frontend : 1. Envia imagem
+Frontend --> Backend : 2. Imagem Base64
+Backend --> Tunnel : 3. Requisição
+Tunnel --> API : 4. Processa
+API --> Inference : 5. Solicita inferência
+Inference --> Model : 6. Consulta
+Model --> Inference : 7. JSON com objetos
+Inference --> API : 8. Resultado
+API --> Tunnel : 9. Resposta
+Tunnel --> Backend : 10. Retorno
+Backend --> Frontend : 11. Dados
+Frontend --> User : 12. Exibe objetos
 
-note right of API
-  Executa Qwen e YOLOE
-  em paralelo com asyncio
-  para melhor performance
+' ===== RELAÇÕES CONCEITUAIS =====
+Tunnel ..> Backend : acesso seguro
+API ..> Inference : chamada assíncrona
+
+' ===== NOTAS EXPLICATIVAS =====
+note bottom of Model
+  <b>Qwen3-VL-8B</b>
+  Modelo multimodal
+  Visão + Linguagem
+  Retorna objetos em JSON
 end note
 
-note right of FusionSvc
-  IoU threshold = 0.15
-  Usa labels do Qwen +
-  bboxes do YOLOE
+note bottom of Inference
+  <b>vLLM</b>
+  Otimizado para inferência
+  Baixa latência
+end note
+
+note bottom of Tunnel
+  <b>Cloudflare Tunnel</b>
+  Sem exposição de porta pública
+  Conexão reversa segura
 end note
 
 @enduml
