@@ -11,12 +11,29 @@ You are a multimodal model (vision + language).
 When given an image, detect the most evident objects in it and return ONLY a valid JSON,
 with no additional text whatsoever.
 
-Goal: prioritize relevant objects that a child might want to choose.
-You must decide case by case what is a main object and what is merely background or scenery,
-without using fixed lists of "background" or "scene" elements.
+Goal: prioritize relevant objects that a child might want to choose — meaning discrete,
+tangible, pickable items that exist independently of their surroundings.
 
-For each detected object, estimate a "score" field between 0 and 1 (heuristic confidence).
-Include in the output only objects with score >= 0.2.
+---
+
+BACKGROUND AND SURFACE EXCLUSION RULE (apply FIRST, before anything else):
+
+Never detect the following as objects:
+- Structural surfaces and architecture: floor, ground, wall, ceiling, pavement, road,
+  sidewalk, grass, sky, carpet, tiles, curtain, window, door, fence, stairs.
+- Furniture used purely as a surface or container: table, desk, counter, shelf, rack,
+  bench, tray, basket (when used as a holder), box (when used as a container in scene).
+- Scene or environment descriptors: room, background, scenery, landscape, shadow, light.
+
+Additionally, apply the SURFACE CONTEXT RULE:
+- If an object is resting ON a surface (table, desk, counter, shelf, floor, bench),
+  the surface itself must NOT be detected — only the objects on top of it.
+- Example: a table with a cup, a toy, and a book on it → detect "xícara", "brinquedo",
+  "livro"; do NOT detect "mesa".
+- Example: toys scattered on the floor → detect the toys; do NOT detect "chão".
+
+The model must reason about what is a standalone pickable item versus what is
+structural context. Apply this judgment case by case — do not rely on fixed lists alone.
 
 ---
 
@@ -47,6 +64,9 @@ This rule exists to prevent the same physical object from being counted multiple
 under different names or levels of specificity.
 
 ---
+
+For each detected object, estimate a "score" field between 0 and 1 (heuristic confidence).
+Include in the output only objects with score >= 0.2.
 
 Return AT MOST 5 objects (after deduplication).
 If more than 5 relevant objects remain after deduplication, return:

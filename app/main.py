@@ -97,10 +97,46 @@ async def detection(body: Prompt) -> dict:
     image_b64 = resize_base64_image(body.image)
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, SYSTEM_INSTRUCTION)
-        qwen_objects = parse_qwen_response(qwen_response)
-        return serialize_detections(qwen_objects, too_many=False)
+        qwen_objects, too_many = parse_qwen_response(qwen_response)
+        return serialize_detections(qwen_objects, too_many=too_many)
 
+@app.post("/detection/compare")
+async def detection_compare(body: Prompt) -> dict:
+    """
+    Endpoint de comparação entre Qwen puro e fusão Qwen + YOLOE.
 
+    Executa ambos os métodos com a mesma chamada ao Qwen e retorna
+    os resultados lado a lado para comparação.
+
+    Args:
+        body (Prompt): Imagem em base64.
+
+    Returns:
+        dict: Dicionário com 'qwen' e 'fused', cada um no formato padrão de detecção.
+    """
+    image_b64 = resize_base64_image(body.image)
+    img = b64_to_pil(image_b64)
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        qwen_task = asyncio.create_task(
+            _call_vllm(client, image_b64, SYSTEM_INSTRUCTION)
+        )
+        yoloe_task = asyncio.get_event_loop().run_in_executor(None, run_yoloe, img)
+
+        vllm_response, yoloe_objects = await asyncio.gather(qwen_task, yoloe_task)
+
+    qwen_objects, too_many = parse_qwen_response(vllm_response)
+
+    if too_many:
+        empty = serialize_detections([], too_many=True)
+        return {"qwen": empty, "fused": empty}
+
+    fused_objects = fuse_by_iou(qwen_objects, yoloe_objects)
+
+    return {
+        "qwen":  serialize_detections(qwen_objects),
+        "fused": serialize_detections(fused_objects),
+    }
 
 @app.post("/detection/sys_prompt")
 async def detection_sys(body: PromptSys) -> dict:
@@ -117,8 +153,9 @@ async def detection_sys(body: PromptSys) -> dict:
     image_b64 = resize_base64_image(body.image)
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, body.prompt)
-        qwen_objects = parse_qwen_response(qwen_response)
-        return serialize_detections(qwen_objects, too_many=False)
+        qwen_objects, too_many = parse_qwen_response(qwen_response)
+        print("Resposta do Qwen com prompt customizado:", qwen_objects)
+        return serialize_detections(qwen_objects, too_many=too_many)
 
 
 
@@ -146,12 +183,12 @@ async def detection_fused(body: Prompt) -> dict:
         yoloe_task = asyncio.get_event_loop().run_in_executor(None, run_yoloe, img)
 
         vllm_response, yoloe_objects = await asyncio.gather(qwen_task, yoloe_task)
+        qwen_objects, too_many = parse_qwen_response(vllm_response)
 
     # Verifica se o Qwen indicou excesso de objetos
-    if vllm_response.get("too_many_objects"):
+    if too_many:
         return serialize_detections([], too_many=True)
 
-    qwen_objects = parse_qwen_response(vllm_response)
     fused_objects = fuse_by_iou(qwen_objects, yoloe_objects)
     return serialize_detections(fused_objects)
 

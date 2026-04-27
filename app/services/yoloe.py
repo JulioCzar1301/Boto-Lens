@@ -8,7 +8,7 @@ retornando objetos detectados com bounding boxes normalizadas.
 import logging
 from PIL import Image
 from ultralytics import YOLOE
-
+import io
 from models import DetectedObject, BBox
 
 log = logging.getLogger(__name__)

@@ -11,7 +11,7 @@ from models import DetectedObject, BBox
 log = logging.getLogger(__name__)
 
 
-def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
+def parse_qwen_response(vllm_response: dict) -> tuple[list[DetectedObject], bool]:
     """
     Extrai e valida a lista de objetos detectados a partir da resposta do vLLM (Qwen).
 
@@ -21,13 +21,13 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
         vllm_response (dict): Resposta bruta da API do vLLM.
 
     Returns:
-        list[DetectedObject]: Lista de objetos detectados (vazia em caso de erro ou limite excedido).
+        tuple[list[DetectedObject], bool]: Lista de objetos detectados e flag too_many_objects.
     """
     try:
         raw = vllm_response["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError) as e:
         log.warning(f"Resposta vLLM inesperada: {e}")
-        return []
+        return [], False
 
     # Remove blocos markdown (```json ... ```) se presentes
     if raw.startswith("```"):
@@ -40,12 +40,12 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         log.warning(f"JSON inválido do Qwen: {e}\n{raw[:300]}")
-        return []
+        return [], False
 
     # Verifica se o modelo indicou muitos objetos
     if data.get("too_many_objects"):
         log.info("Qwen: too_many_objects=true")
-        return []
+        return [], True
 
     objects = []
     for obj in data.get("objects", []):
@@ -69,4 +69,4 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
         ))
 
     log.info(f"Qwen: {len(objects)} objeto(s) detectado(s)")
-    return objects
+    return objects, False

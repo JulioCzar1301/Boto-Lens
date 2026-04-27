@@ -10,7 +10,7 @@ from models import DetectedObject
 
 log = logging.getLogger(__name__)
 
-IOU_THRESHOLD = 0.15  # Limiar mínimo de IoU para considerar um match
+IOU_THRESHOLD = 0.5  # Limiar mínimo de IoU para considerar um match
 
 
 def fuse_by_iou(
