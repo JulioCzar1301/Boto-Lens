@@ -94,7 +94,7 @@ async def detection(body: Prompt) -> dict:
     Returns:
         dict: Resposta original do vLLM.
     """
-    image_b64 = resize_base64_image(body.image)
+    image_b64 = body.image
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, SYSTEM_INSTRUCTION)
         qwen_objects = parse_qwen_response(qwen_response)
@@ -114,7 +114,7 @@ async def detection_sys(body: PromptSys) -> dict:
         dict: Resposta do vLLM com o prompt informado.
     """
     
-    image_b64 = resize_base64_image(body.image)
+    image_b64 = body.image
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, body.prompt)
         qwen_objects = parse_qwen_response(qwen_response)
@@ -136,7 +136,7 @@ async def detection_fused(body: Prompt) -> dict:
     Returns:
         dict: Lista de objetos detectados após fusão.
     """
-    image_b64 = resize_base64_image(body.image)
+    image_b64 = body.image
     img = b64_to_pil(image_b64)
 
     async with httpx.AsyncClient(timeout=120.0) as client:

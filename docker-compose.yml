@@ -2,9 +2,14 @@ services:
   vllm:
     image: vllm/vllm-openai:latest
     container_name: vllm-server
-    runtime: nvidia
+    ports:
       - "8000:8000"
     ipc: host
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ~/.cache/vllm:/root/.cache/vllm
+    environment:
+      - HF_TOKEN=hf_your_token_here
     command:
       - "--model"
       - "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit"
@@ -26,9 +31,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 360s
     networks:
-      - app-network          # ← adicionado
+      - app-network
 
   api:
     build: .
@@ -37,8 +42,8 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - VLLM_URL=http://vllm:8000   # ← nome do serviço, não host.docker.internal
-    depends_on:                      # ← adicionado
+      - VLLM_URL=http://vllm:8000
+    depends_on:
       vllm:
         condition: service_healthy
     networks:
