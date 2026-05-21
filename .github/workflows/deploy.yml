@@ -10,9 +10,9 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/julioczar1301/boto-lens-api
 
-# ──────────────────────────────────────────────────────────────────────────────
-# JOB 1 — Builda a imagem Docker e faz push ao GitHub Container Registry
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# JOB 1 - Builda a imagem Docker e faz push ao GitHub Container Registry
+# ------------------------------------------------------------------------------
 jobs:
   build-and-push:
     name: Build & Push Docker Image
@@ -20,13 +20,13 @@ jobs:
 
     permissions:
       contents: read
-      packages: write   # necessário para escrever no ghcr.io
+      packages: write   # necessario para escrever no ghcr.io
 
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
-      - name: Checkout do código
+      - name: Checkout do codigo
         uses: actions/checkout@v4
 
       - name: Login no GitHub Container Registry
@@ -34,7 +34,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}   # token automático do Actions
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extrair metadados da imagem (tags e labels)
         id: meta
@@ -42,12 +42,10 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            # Tag :latest sempre atualizada
             type=raw,value=latest
-            # Tag com o SHA do commit para rollback (ex: sha-a1b2c3d)
             type=sha,prefix=sha-
 
-      - name: Configurar Docker Buildx (builds mais rápidos)
+      - name: Configurar Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build e Push da imagem
@@ -57,54 +55,57 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Cache de layers entre runs para acelerar builds subsequentes
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # JOB 2 — Conecta ao servidor via SSH e aplica o deploy
-  # Só roda após o build-and-push concluir com sucesso
-  # ────────────────────────────────────────────────────────────────────────────
+  # ----------------------------------------------------------------------------
+  # JOB 2 - Conecta ao node01 via master (jump host) e aplica o deploy
+  # Fluxo: GitHub Actions -> master (IP publico) -> node01 (rede interna)
+  # ----------------------------------------------------------------------------
   deploy:
-    name: Deploy no Servidor
+    name: Deploy no node01
     runs-on: ubuntu-latest
-    needs: build-and-push   # aguarda job 1 terminar
+    needs: build-and-push
 
     steps:
-      - name: Deploy via SSH
+      - name: Deploy via SSH (jump host pelo master)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SSH_HOST }}
+          # --- Destino final: node01 (acessivel apenas pela rede interna) ---
+          host: ${{ secrets.NODE01_HOST }}      # ex: node01 ou 192.168.x.x
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}       # default: 22 se não configurado
-          # Variáveis de ambiente disponíveis no script remoto
+          port: ${{ secrets.SSH_PORT }}
+
+          # --- Jump host: master (tem IP publico, serve de ponte) ---
+          proxy_host: ${{ secrets.SSH_HOST }}   # IP publico do master
+          proxy_username: ${{ secrets.SSH_USER }}
+          proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          proxy_port: ${{ secrets.SSH_PORT }}
+
           envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH
           script: |
-            set -e   # aborta se qualquer comando falhar
+            set -e
 
-            # 1. Autentica no ghcr.io para poder fazer pull da imagem privada
+            # 1. Autentica no ghcr.io para pull da imagem privada
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-            # 2. Atualiza o código no servidor (docker-compose.yml etc.)
+            # 2. Atualiza o codigo no node01
             cd "$DEPLOY_PATH"
             git checkout -- .
             git pull origin main
 
-            # 3. Baixa a nova imagem da API (leve: só o que mudou nas layers)
+            # 3. Baixa a nova imagem da API
             docker compose pull api
 
-            # 4. Sobe o container da API sem derrubar o vllm
+            # 4. Sobe apenas o container da API (vllm continua rodando)
             docker compose up -d --no-deps api
 
-            # 5. Remove imagens antigas para liberar espaço em disco
+            # 5. Remove imagens antigas para liberar espaco em disco
             docker image prune -f
 
-            echo "✅ Deploy concluído com sucesso!"
+            echo "Deploy concluido com sucesso no node01!"
         env:
-          # PAT com escopo read:packages — configure em:
-          # GitHub → Settings → Developer settings → Personal access tokens
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          # Caminho absoluto do repositório no servidor (ex: /home/ubuntu/Boto-Lens)
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
