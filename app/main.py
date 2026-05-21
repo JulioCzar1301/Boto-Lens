@@ -262,7 +262,6 @@ async def detection(body: Prompt) -> dict:
         return serialize_detections(qwen_objects, too_many=False)
 
 
-
 @app.post("/detection/sys_prompt")
 async def detection_sys(body: PromptSys) -> dict:
     """
@@ -274,13 +273,11 @@ async def detection_sys(body: PromptSys) -> dict:
     Returns:
         dict: Resposta do vLLM com o prompt informado.
     """
-    
     image_b64 = resize_base64_image(body.image)
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, body.prompt)
         qwen_objects = parse_qwen_response(qwen_response)
         return serialize_detections(qwen_objects, too_many=False)
-
 
 
 @app.post("/detection/fused")
@@ -292,12 +289,10 @@ async def detection_fused(body: Prompt) -> dict:
         1. YOLOE detecta todos os objetos na imagem, retornando bboxes precisas
            e labels brutos (possivelmente em inglês ou mal nomeados).
         2. Objetos muito pequenos (área < 0.5 % da imagem) são descartados como ruído.
-        3. A imagem é anotada com bboxes NUMERADAS (índice original de cada objeto)
-           usando cores distintas para cada box.
-        4. O Qwen recebe: imagem anotada + JSON {index, label, conf, bbox_norm,
-           area, prominence}. Ele seleciona os objetos mais significantes
-           (não necessariamente os de maior confiança) e os renomeia em português.
-        5. As coordenadas retornadas são SEMPRE as do YOLOE (preservadas via yoloe_index).
+        3. O Qwen recebe a imagem original limpa + JSON {index, label, conf, bbox_norm,
+           area, prominence}. Ele usa as coordenadas para localizar cada objeto e
+           seleciona os mais significantes, renomeando-os em português.
+        4. As coordenadas retornadas são SEMPRE as do YOLOE (preservadas via yoloe_index).
 
     Args:
         body (Prompt): Imagem em base64.
@@ -318,9 +313,18 @@ async def detection_fused(body: Prompt) -> dict:
     print(f"🔷 YOLOE: {len(yoloe_objects)} objeto(s) detectado(s)")
     print(yoloe_objects)
 
-    # Etapas 2-4: filtra por área, anota a imagem com boxes numeradas e chama o Qwen
+    # Etapa 2: Qwen recebe imagem limpa + JSON, seleciona e renomeia
     async with httpx.AsyncClient(timeout=120.0) as client:
         vllm_response = await _call_vllm_sequential(client, img, yoloe_objects)
         print(vllm_response)
 
-    # Etap
+    # Etapa 3: monta o resultado final com bboxes do YOLOE preservadas
+    refined_objects = parse_qwen_refine_response(vllm_response, yoloe_objects)
+    return serialize_detections(refined_objects)
+
+
+@app.get("/health")
+async def health() -> dict:
+    """Endpoint de health check."""
+    return {"status": "ok"}
+                                                                                                                                                                                  
