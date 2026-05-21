@@ -8,7 +8,7 @@ Endpoints disponíveis:
 - /health: Health check
 
 Arquitetura do pipeline /detection/fused (clean-image + JSON):
-  1. YOLOE-zero detecta todos os objetos → bboxes precisas + labels brutos.
+  1. YOLOE-zero detecta todos os objetos -> bboxes precisas + labels brutos.
   2. Os objetos são filtrados por área mínima (remove ruídos muito pequenos).
   3. O Qwen recebe a imagem ORIGINAL LIMPA (sem anotações) + JSON com
      {index, label, conf, bbox_norm, area, prominence}. Usando as coordenadas
@@ -39,27 +39,27 @@ from utils.image import (
 app = FastAPI()
 
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Startup Events
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 
 @app.on_event("startup")
 async def startup_event():
     """Carrega o modelo YOLO durante a inicialização da API."""
-    print("🚀 Inicializando... Carregando modelo YOLO...")
+    print("Inicializando... Carregando modelo YOLO...")
     try:
-        get_yoloe()  # Carrega o modelo YOLO na memória
-        print("✅ Modelo YOLO carregado com sucesso!")
+        get_yoloe()
+        print("Modelo YOLO carregado com sucesso!")
     except Exception as e:
-        print(f"❌ Erro ao carregar modelo YOLO: {e}")
+        print(f"Erro ao carregar modelo YOLO: {e}")
         raise
 
 VLLM_URL = os.getenv("VLLM_URL", "http://vllm:8000") + "/v1/chat/completions"
 
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Schemas (Pydantic)
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 
 class Prompt(BaseModel):
     """Payload para detecção sem prompt customizado."""
@@ -72,18 +72,18 @@ class PromptSys(BaseModel):
     prompt: str
 
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Helpers
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 
 async def _call_vllm(client: httpx.AsyncClient, image_b64: str, system: str) -> dict:
     """
     Realiza chamada para o vLLM (Qwen) com a imagem e instrução de sistema.
 
     Args:
-        client (httpx.AsyncClient): Cliente HTTP assíncrono.
-        image_b64 (str): Imagem em base64.
-        system (str): Instrução de sistema para o modelo.
+        client: Cliente HTTP assíncrono.
+        image_b64: Imagem em base64.
+        system: Instrução de sistema para o modelo.
 
     Returns:
         dict: Resposta JSON do vLLM.
@@ -108,18 +108,18 @@ async def _call_vllm(client: httpx.AsyncClient, image_b64: str, system: str) -> 
         },
     )
     result = response.json()
-    print(f"🔹 vLLM Response Status: {response.status_code}")
-    print(f"🔹 vLLM Response: {result}")
+    print(f"vLLM Response Status: {response.status_code}")
+    print(f"vLLM Response: {result}")
     return result
 
 
 # Fração mínima da área da imagem para um objeto ser enviado ao Qwen.
-# Objetos menores que 0.5 % da imagem são considerados ruído e descartados.
+# Objetos menores que 0.5% da imagem são considerados ruído e descartados.
 _MIN_AREA_FRACTION = 0.005
 
 
 def _bbox_area(bbox: BBox) -> float:
-    """Retorna a área normalizada da bounding box (0–1)."""
+    """Retorna a área normalizada da bounding box (0-1)."""
     return max(0.0, (bbox.x2 - bbox.x1) * (bbox.y2 - bbox.y1))
 
 
@@ -132,7 +132,7 @@ def _bbox_prominence(bbox: BBox) -> float:
     - centrality: 1 quando o centro do objeto coincide com o centro da imagem; 0 nos cantos.
     """
     area = _bbox_area(bbox)
-    area_score = min(1.0, math.sqrt(area) * 2)  # sqrt(0.25)*2 = 1.0 para objetos grandes
+    area_score = min(1.0, math.sqrt(area) * 2)
 
     cx = (bbox.x1 + bbox.x2) / 2
     cy = (bbox.y1 + bbox.y2) / 2
@@ -147,7 +147,7 @@ async def _call_vllm_sequential(
     yoloe_objects: list[DetectedObject],
 ) -> dict:
     """
-    Etapa 2 do pipeline YOLOE → Qwen (arquitetura clean-image + JSON).
+    Etapa 2 do pipeline YOLOE -> Qwen (arquitetura clean-image + JSON).
 
     Fluxo interno:
       1. Filtra objetos com área < _MIN_AREA_FRACTION (remove ruído).
@@ -157,9 +157,9 @@ async def _call_vllm_sequential(
          sem interferência de marcações visuais.
 
     Args:
-        client (httpx.AsyncClient): Cliente HTTP assíncrono.
-        img (Image.Image): Imagem PIL original (sem anotações).
-        yoloe_objects (list[DetectedObject]): Todas as detecções do YOLOE.
+        client: Cliente HTTP assíncrono.
+        img: Imagem PIL original (sem anotações).
+        yoloe_objects: Todas as detecções do YOLOE.
 
     Returns:
         dict: Resposta JSON do vLLM.
@@ -216,7 +216,7 @@ async def _call_vllm_sequential(
                             "text": (
                                 "The image below is the original photo with NO annotations drawn on it.\n\n"
                                 "The JSON list below contains objects detected by YOLOE-zero. "
-                                "Each entry includes 'bbox_norm' with normalized coordinates (0–1) "
+                                "Each entry includes 'bbox_norm' with normalized coordinates (0-1) "
                                 "that tell you exactly where each object is located in the image. "
                                 "Use these coordinates to locate each object visually in the clean photo.\n\n"
                                 f"YOLOE detections:\n{yoloe_payload}\n\n"
@@ -235,14 +235,14 @@ async def _call_vllm_sequential(
         },
     )
     result = response.json()
-    print(f"🔹 vLLM Sequential Response Status: {response.status_code}")
-    print(f"🔹 vLLM Sequential Response: {result}")
+    print(f"vLLM Sequential Response Status: {response.status_code}")
+    print(f"vLLM Sequential Response: {result}")
     return result
 
 
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 # Endpoints
-# ──────────────────────────────────────────────
+# ----------------------------------------------
 
 @app.post("/detection")
 async def detection(body: Prompt) -> dict:
@@ -250,7 +250,7 @@ async def detection(body: Prompt) -> dict:
     Endpoint que retorna a resposta bruta do Qwen (sem fusão).
 
     Args:
-        body (Prompt): Imagem em base64.
+        body: Imagem em base64.
 
     Returns:
         dict: Resposta original do vLLM.
@@ -268,7 +268,7 @@ async def detection_sys(body: PromptSys) -> dict:
     Endpoint que permite enviar um prompt customizado para o Qwen.
 
     Args:
-        body (PromptSys): Imagem em base64 e prompt customizado.
+        body: Imagem em base64 e prompt customizado.
 
     Returns:
         dict: Resposta do vLLM com o prompt informado.
@@ -283,19 +283,19 @@ async def detection_sys(body: PromptSys) -> dict:
 @app.post("/detection/fused")
 async def detection_fused(body: Prompt) -> dict:
     """
-    Endpoint principal — pipeline sequencial YOLOE → Qwen.
+    Endpoint principal - pipeline sequencial YOLOE -> Qwen.
 
     Fluxo:
         1. YOLOE detecta todos os objetos na imagem, retornando bboxes precisas
            e labels brutos (possivelmente em inglês ou mal nomeados).
-        2. Objetos muito pequenos (área < 0.5 % da imagem) são descartados como ruído.
+        2. Objetos muito pequenos (área < 0.5% da imagem) são descartados como ruído.
         3. O Qwen recebe a imagem original limpa + JSON {index, label, conf, bbox_norm,
            area, prominence}. Ele usa as coordenadas para localizar cada objeto e
            seleciona os mais significantes, renomeando-os em português.
         4. As coordenadas retornadas são SEMPRE as do YOLOE (preservadas via yoloe_index).
 
     Args:
-        body (Prompt): Imagem em base64.
+        body: Imagem em base64.
 
     Returns:
         dict: Lista de objetos refinados com label em português e bbox do YOLOE.
@@ -310,7 +310,7 @@ async def detection_fused(body: Prompt) -> dict:
     if not yoloe_objects:
         return serialize_detections([], too_many=False)
 
-    print(f"🔷 YOLOE: {len(yoloe_objects)} objeto(s) detectado(s)")
+    print(f"YOLOE: {len(yoloe_objects)} objeto(s) detectado(s)")
     print(yoloe_objects)
 
     # Etapa 2: Qwen recebe imagem limpa + JSON, seleciona e renomeia
@@ -327,4 +327,3 @@ async def detection_fused(body: Prompt) -> dict:
 async def health() -> dict:
     """Endpoint de health check."""
     return {"status": "ok"}
-                                                                                                                                                                                  
