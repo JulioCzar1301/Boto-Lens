@@ -68,43 +68,31 @@ jobs:
     needs: build-and-push
 
     steps:
-      - name: Deploy via SSH (jump host pelo master)
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          # --- Destino final: node01 (acessivel apenas pela rede interna) ---
-          host: ${{ secrets.NODE01_HOST }}      # ex: node01 ou 192.168.x.x
+          host: ${{ secrets.SSH_HOST }}        # master (IP público)
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
-
-          # --- Jump host: master (tem IP publico, serve de ponte) ---
-          proxy_host: ${{ secrets.SSH_HOST }}   # IP publico do master
-          proxy_username: ${{ secrets.SSH_USER }}
-          proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
-          proxy_port: ${{ secrets.SSH_PORT }}
-
           envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH
           script: |
             set -e
-
-            # 1. Autentica no ghcr.io para pull da imagem privada
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-
-            # 2. Atualiza o codigo no node01
-            cd "$DEPLOY_PATH"
-            git checkout -- .
-            git pull origin main
-
-            # 3. Baixa a nova imagem da API
-            docker compose pull api
-
-            # 4. Sobe apenas o container da API (vllm continua rodando)
-            docker compose up -d --no-deps api
-
-            # 5. Remove imagens antigas para liberar espaco em disco
-            docker image prune -f
-
-            echo "Deploy concluido com sucesso no node01!"
+            ssh -o StrictHostKeyChecking=no node01 \
+              GHCR_TOKEN="$GHCR_TOKEN" \
+              GITHUB_ACTOR="$GITHUB_ACTOR" \
+              DEPLOY_PATH="$DEPLOY_PATH" \
+              bash << 'ENDSSH'
+                set -e
+                echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+                cd "$DEPLOY_PATH"
+                git checkout -- .
+                git pull origin main
+                docker compose pull api
+                docker compose up -d --no-deps api
+                docker image prune -f
+                echo "Deploy concluido com sucesso no node01!"
+            ENDSSH
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
