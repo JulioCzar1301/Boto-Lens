@@ -88,6 +88,7 @@ jobs:
 
             # 2. Atualiza o código no servidor (docker-compose.yml etc.)
             cd "$DEPLOY_PATH"
+            git checkout -- .
             git pull origin main
 
             # 3. Baixa a nova imagem da API (leve: só o que mudou nas layers)
