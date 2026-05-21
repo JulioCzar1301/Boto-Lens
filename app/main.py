@@ -7,13 +7,14 @@ Endpoints disponíveis:
 - /detection/fused: Pipeline sequencial — YOLOE detecta tudo → Qwen refina e nomeia
 - /health: Health check
 
-Arquitetura do pipeline /detection/fused:
+Arquitetura do pipeline /detection/fused (clean-image + JSON):
   1. YOLOE-zero detecta todos os objetos → bboxes precisas + labels brutos.
   2. Os objetos são filtrados por área mínima (remove ruídos muito pequenos).
-  3. A imagem é anotada com bounding boxes NUMERADAS (índice original de cada objeto).
-  4. O Qwen recebe a imagem anotada + JSON com {index, label, conf, bbox_norm, area,
-     prominence} e seleciona os objetos mais significantes, renomeando-os em português.
-  5. As coordenadas finais são SEMPRE as do YOLOE (preservadas pelo yoloe_index).
+  3. O Qwen recebe a imagem ORIGINAL LIMPA (sem anotações) + JSON com
+     {index, label, conf, bbox_norm, area, prominence}. Usando as coordenadas
+     bbox_norm, ele localiza cada objeto na foto e seleciona os mais significantes,
+     renomeando-os em português. Nenhuma marcação visual é desenhada na imagem.
+  4. As coordenadas finais são SEMPRE as do YOLOE (preservadas pelo yoloe_index).
 """
 
 import math
@@ -32,8 +33,6 @@ from services.fusion import serialize_detections
 from utils.image import (
     resize_base64_image,
     b64_to_pil,
-    draw_yoloe_detections,
-    draw_indexed_detections,
     pil_to_b64,
 )
 
@@ -148,13 +147,14 @@ async def _call_vllm_sequential(
     yoloe_objects: list[DetectedObject],
 ) -> dict:
     """
-    Etapa 2 do pipeline YOLOE → Qwen.
+    Etapa 2 do pipeline YOLOE → Qwen (arquitetura clean-image + JSON).
 
     Fluxo interno:
       1. Filtra objetos com área < _MIN_AREA_FRACTION (remove ruído).
-      2. Anota a imagem com bboxes NUMERADAS usando os índices originais.
-      3. Monta o payload JSON: {index, label, conf, bbox_norm, area, prominence}.
-      4. Envia imagem anotada + JSON ao Qwen e retorna a resposta bruta.
+      2. Monta o payload JSON: {index, label, conf, bbox_norm, area, prominence}.
+      3. Envia a imagem ORIGINAL LIMPA (sem nenhuma anotação) + JSON ao Qwen.
+         O Qwen usa as coordenadas bbox_norm para localizar os objetos na foto,
+         sem interferência de marcações visuais.
 
     Args:
         client (httpx.AsyncClient): Cliente HTTP assíncrono.
@@ -177,9 +177,8 @@ async def _call_vllm_sequential(
         # Fallback: sem filtro de área se todos os objetos forem pequenos
         filtered = list(enumerate(yoloe_objects))
 
-    # 2. Anota a imagem com bboxes numeradas
-    annotated_img = draw_indexed_detections(img, filtered)
-    annotated_b64 = pil_to_b64(annotated_img)
+    # 2. Converte a imagem original limpa para base64 (sem nenhuma anotação)
+    clean_b64 = pil_to_b64(img)
 
     # 3. Monta o payload JSON com contexto espacial enriquecido
     yoloe_payload = _json.dumps(
@@ -202,7 +201,7 @@ async def _call_vllm_sequential(
         ensure_ascii=False,
     )
 
-    # 4. Chama o Qwen com a imagem anotada e o JSON de detecções
+    # 4. Chama o Qwen com a imagem limpa + JSON de coordenadas
     response = await client.post(
         VLLM_URL,
         json={
@@ -215,10 +214,12 @@ async def _call_vllm_sequential(
                         {
                             "type": "text",
                             "text": (
-                                "The image has numbered bounding boxes drawn on it. "
-                                "Each number corresponds to the 'index' field in the JSON list below.\n\n"
+                                "The image below is the original photo with NO annotations drawn on it.\n\n"
+                                "The JSON list below contains objects detected by YOLOE-zero. "
+                                "Each entry includes 'bbox_norm' with normalized coordinates (0–1) "
+                                "that tell you exactly where each object is located in the image. "
+                                "Use these coordinates to locate each object visually in the clean photo.\n\n"
                                 f"YOLOE detections:\n{yoloe_payload}\n\n"
-                                "Analyze the annotated image together with the JSON. "
                                 "Select the most visually significant and interactive objects "
                                 "that a child would want to interact with. "
                                 "Rename them correctly in Brazilian Portuguese."
@@ -226,7 +227,7 @@ async def _call_vllm_sequential(
                         },
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{annotated_b64}"},
+                            "image_url": {"url": f"data:image/jpeg;base64,{clean_b64}"},
                         },
                     ],
                 },
@@ -322,12 +323,4 @@ async def detection_fused(body: Prompt) -> dict:
         vllm_response = await _call_vllm_sequential(client, img, yoloe_objects)
         print(vllm_response)
 
-    # Etapa 5: monta o resultado final com bboxes do YOLOE preservadas
-    refined_objects = parse_qwen_refine_response(vllm_response, yoloe_objects)
-    return serialize_detections(refined_objects)
-
-
-@app.get("/health")
-async def health() -> dict:
-    """Endpoint de health check."""
-    return {"status": "ok"}
+    # Etap
