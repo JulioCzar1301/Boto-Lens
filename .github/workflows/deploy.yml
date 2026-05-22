@@ -1,6 +1,5 @@
 name: Build, Push & Deploy
 
-# Dispara a cada push (ou merge de PR) na branch main
 on:
   push:
     branches:
@@ -58,10 +57,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # JOB 2 — Conecta ao node01 via SSH e aplica o deploy
-  # Só roda após o build-and-push concluir com sucesso
-  # ────────────────────────────────────────────────────────────────────────────
+  # ----------------------------------------------------------------------------
+  # JOB 2 - Conecta ao node01 via SSH e aplica o deploy
+  # ----------------------------------------------------------------------------
   deploy:
     name: Deploy no node01
     runs-on: ubuntu-latest
@@ -75,31 +73,32 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-      
+
           proxy_host: ${{ secrets.SSH_HOST }}
           proxy_username: ${{ secrets.SSH_USER }}
           proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
           proxy_port: ${{ secrets.SSH_PORT }}
-      
+
           envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH
           script: |
             set -e
-      
+
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-      
+
             cd "$DEPLOY_PATH"
             git checkout -- .
             git pull origin main
 
-            # 3. Garante que o vllm está rodando (--no-recreate evita reiniciar
-            #    se já estiver up, poupando os ~6 min de carregamento do modelo)
-            docker compose up -d --no-recreate vllm
+            # Tenta subir o vllm, mas NÃO aborta o deploy se falhar.
+            # Isso garante que a API sempre seja atualizada, mesmo que o
+            # nvidia-container-toolkit ainda não esteja instalado no host.
+            docker compose up -d --no-recreate vllm || \
+              echo "AVISO: vllm nao subiu (verifique nvidia-container-toolkit). Continuando deploy da API..."
 
-            # 4. Baixa e sobe a nova imagem da API sem derrubar o vllm
+            # Atualiza a API independente do estado do vllm
             docker compose pull api
             docker compose up -d --no-deps api
 
-            # 5. Remove imagens antigas para liberar espaço em disco
             docker image prune -f
 
             echo "Deploy concluido com sucesso no node01!"
