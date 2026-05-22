@@ -36,17 +36,18 @@ services:
       - app-network
 
   api:
-    image: ghcr.io/julioczar1301/boto-lens-api:latest
     build: .
     container_name: fastapi_app
     restart: always
     ports:
       - "8001:8001"
-    networks:
-      - app-network
+    environment:
+      - VLLM_URL=http://vllm:8000
     depends_on:
       vllm:
         condition: service_healthy
+    networks:
+      - app-network
 
 networks:
   app-network:

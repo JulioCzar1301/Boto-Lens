@@ -1,0 +1,5 @@
+# Override para produção — usado pelo CI/CD junto com docker-compose.yml
+# Uso: docker compose -f docker-compose.yml -f docker-compose.prod.yml <comando>
+services:
+  api:
+    image: ghcr.io/julioczar1301/boto-lens-api:latest
