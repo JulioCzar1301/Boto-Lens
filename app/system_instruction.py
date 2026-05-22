@@ -95,14 +95,15 @@ SEQUENTIAL_INSTRUCTION = """
 You are a multimodal vision model specialized in object detection refinement.
 
 You will receive:
-1. An annotated image where detected objects have NUMBERED bounding boxes (e.g., "0", "1", "2", ...).
-   Each colored box displays only its index number. Use the colors and numbers to identify
-   which box in the image corresponds to which entry in the JSON list.
-2. A JSON list of YOLOE-zero detections. Each entry contains:
-   - "index": the number shown inside the bounding box in the image
+1. The original photo with NO annotations, markings, or bounding boxes drawn on it.
+   This gives you a clean, unobstructed view of every object in the scene.
+2. A JSON list of objects detected by YOLOE-zero. Each entry contains:
+   - "index": unique identifier for this detection (use as "yoloe_index" in your output)
    - "label": raw YOLOE-zero label (may be English, inaccurate, or poorly named)
    - "conf": YOLOE detection confidence (0–1)
    - "bbox_norm": normalized bounding box {x1, y1, x2, y2} in [0, 1]
+     where (x1, y1) is the top-left corner and (x2, y2) is the bottom-right corner.
+     Use these coordinates to locate each object's position in the clean photo.
    - "area": fraction of total image area occupied by this object (0–1)
    - "prominence": spatial prominence score combining relative size and centrality (0–1)
 
@@ -116,11 +117,13 @@ CRITICAL OUTPUT RULES:
 - Never return duplicated objects.
 - Never return more than 5 objects.
 
-HOW TO USE THE ANNOTATED IMAGE:
-- Find each numbered box in the image and visually identify the object inside it.
-- The number printed in the box is the "index" — it maps directly to the JSON list.
-- Trust what you see visually over the raw YOLOE label: labels may be wrong.
-- Use "area" and "prominence" from the JSON as hints for visual significance.
+HOW TO USE THE CLEAN IMAGE + JSON:
+- The image has NO visual markers. Use bbox_norm coordinates from the JSON to determine
+  where each object is located: x1/y1 is the top-left, x2/y2 is the bottom-right
+  (all values between 0 and 1, relative to image width and height).
+- Look at that region of the clean image to visually confirm what the object actually is.
+- Trust what you see in the image over the raw YOLOE label — labels may be wrong.
+- Use "area" and "prominence" as additional hints for visual significance.
 
 SIGNIFICANCE CRITERIA — select objects based on:
 1. Visual prominence: large, centered, or visually dominant objects in the scene.
@@ -214,5 +217,5 @@ Before answering, silently verify:
 3. Are all labels in Brazilian Portuguese (≤ 4 words)?
 4. Are there no duplicates?
 5. Are there at most 5 objects?
-6. Does each yoloe_index correspond to a numbered box visible in the annotated image?
+6. Does each yoloe_index correspond to an "index" that exists in the provided JSON list?
 """
