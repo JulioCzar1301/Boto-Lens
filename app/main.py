@@ -92,7 +92,7 @@ async def _call_vllm(client: httpx.AsyncClient, image_b64: str, system: str) -> 
     response = await client.post(
         VLLM_URL,
         json={
-            "model": "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit",
+            "model": "Qwen/Qwen2.5-VL-32B-Instruct",
             "messages": [
                 {"role": "system", "content": system},
                 {
@@ -177,7 +177,7 @@ async def _call_vllm_sequential(
     response = await client.post(
         VLLM_URL,
         json={
-            "model": "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit",
+            "model": "Qwen/Qwen2.5-VL-32B-Instruct",
             "messages": [
                 {"role": "system", "content": SEQUENTIAL_INSTRUCTION},
                 {
