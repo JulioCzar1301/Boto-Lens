@@ -68,7 +68,7 @@ jobs:
     needs: build-and-push
 
     steps:
-      - name: Deploy via SSH (jump host pelo master)
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.NODE01_HOST }}

@@ -212,4 +212,10 @@ If no object is relevant, return exactly:
 {"objects":[],"too_many_objects":false}
 
 Before answering, silently verify:
-1. Is the output valid JSON w
+1. Is the output valid JSON with no markdown?
+2. Is the JSON fully closed?
+3. Are all labels in Brazilian Portuguese (≤ 4 words)?
+4. Are there no duplicates?
+5. Are there at most 5 objects?
+6. Does each yoloe_index correspond to an "index" that exists in the provided JSON list?
+"""
