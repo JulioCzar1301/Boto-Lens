@@ -58,10 +58,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ----------------------------------------------------------------------------
-  # JOB 2 - Conecta ao node01 via master (jump host) e aplica o deploy
-  # Fluxo: GitHub Actions -> master (IP publico) -> node01 (rede interna)
-  # ----------------------------------------------------------------------------
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Conecta ao node01 via SSH e aplica o deploy
+  # Só roda após o build-and-push concluir com sucesso
+  # ────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy no node01
     runs-on: ubuntu-latest
@@ -90,12 +90,18 @@ jobs:
             cd "$DEPLOY_PATH"
             git checkout -- .
             git pull origin main
-      
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps api
-      
+
+            # 3. Garante que o vllm está rodando (--no-recreate evita reiniciar
+            #    se já estiver up, poupando os ~6 min de carregamento do modelo)
+            docker compose up -d --no-recreate vllm
+
+            # 4. Baixa e sobe a nova imagem da API sem derrubar o vllm
+            docker compose pull api
+            docker compose up -d --no-deps api
+
+            # 5. Remove imagens antigas para liberar espaço em disco
             docker image prune -f
-      
+
             echo "Deploy concluido com sucesso no node01!"
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
