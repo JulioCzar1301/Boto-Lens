@@ -62,11 +62,11 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ────────────────────────────────────────────────────────────────────────────
-  # JOB 2 — Conecta ao servidor via SSH e aplica o deploy
+  # JOB 2 — Conecta ao node01 via SSH e aplica o deploy
   # Só roda após o build-and-push concluir com sucesso
   # ────────────────────────────────────────────────────────────────────────────
   deploy:
-    name: Deploy no Servidor
+    name: Deploy no node01
     runs-on: ubuntu-latest
     needs: build-and-push   # aguarda job 1 terminar
 
@@ -88,18 +88,21 @@ jobs:
 
             # 2. Atualiza o código no servidor (docker-compose.yml etc.)
             cd "$DEPLOY_PATH"
+            git checkout -- .
             git pull origin main
 
-            # 3. Baixa a nova imagem da API (leve: só o que mudou nas layers)
-            docker compose pull api
+            # 3. Garante que o vllm está rodando (--no-recreate evita reiniciar
+            #    se já estiver up, poupando os ~6 min de carregamento do modelo)
+            docker compose up -d --no-recreate vllm
 
-            # 4. Sobe o container da API sem derrubar o vllm
+            # 4. Baixa e sobe a nova imagem da API sem derrubar o vllm
+            docker compose pull api
             docker compose up -d --no-deps api
 
             # 5. Remove imagens antigas para liberar espaço em disco
             docker image prune -f
 
-            echo "✅ Deploy concluído com sucesso!"
+            echo "Deploy concluido com sucesso no node01!"
         env:
           # PAT com escopo read:packages — configure em:
           # GitHub → Settings → Developer settings → Personal access tokens
