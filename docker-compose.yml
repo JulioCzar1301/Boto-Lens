@@ -36,11 +36,19 @@ services:
       - app-network
 
   api:
-    # Em produção, o CI/CD faz push desta imagem ao ghcr.io e o servidor faz pull.
-    # Em desenvolvimento local, rode: docker-compose up --build api
-    image: ghcr.io/julioczar1301/boto-lens-api:latest
     build: .
     container_name: fastapi_app
     restart: always
     ports:
-      - "8001
+      - "8001:8001"
+    environment:
+      - VLLM_URL=http://vllm:8000
+    depends_on:
+      vllm:
+        condition: service_healthy
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
