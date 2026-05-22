@@ -97,7 +97,7 @@ jobs:
 
             # Atualiza a API independente do estado do vllm
             docker compose pull api
-            docker compose up -d --no-deps api
+            docker compose up -d --no-deps --force-recreate api
 
             docker image prune -f
 
