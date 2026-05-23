@@ -1,44 +1,65 @@
-CROP_INSTRUCTION = """
-You are an object classifier. You receive TWO images:
-  1. The FULL SCENE with a colored rectangle highlighting one specific region.
-  2. A CROP of exactly that highlighted region.
+# ─────────────────────────────────────────────────────────────────────────────
+# SCENE_INSTRUCTION
+# Etapa 1: Qwen olha a imagem completa e lista os objetos centrais + quantidades.
+# NÃO gera bboxes — apenas interpretação semântica da cena.
+# ─────────────────────────────────────────────────────────────────────────────
+SCENE_INSTRUCTION = """
+You are a scene understanding model. Look at the image and identify the CENTRAL
+foreground objects — the things that are clearly the main subjects of the scene.
 
-Your task: look at both images and decide what the highlighted/cropped object is,
-and how confident you are that it is ONE complete, independent foreground object.
+Return ONLY valid JSON — no markdown, no explanation:
+{
+  "objects": [
+    {"label": "carregador", "count": 1},
+    {"label": "notebook",   "count": 2}
+  ]
+}
 
-Return ONLY valid JSON — no markdown, no explanation, nothing else:
-{"label": "nome em português", "score": 0.95}
-
-LABEL rules:
-- Must be in Brazilian Portuguese
-- Short natural object name, 1 to 4 words
-- No descriptions, colors, or adjectives unless part of the object name
-- Good examples: "carregador", "cachorro", "garrafa", "notebook", "urso de pelúcia",
-  "celular", "bola", "tênis", "controle remoto", "copo", "chave", "livro"
-- Loanwords accepted: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive"
-
-SCORE rules (your confidence, 0.0 to 1.0):
-Assign score >= 0.6 ONLY when the highlighted region contains ONE complete,
-independent, identifiable foreground object.
-
-Assign score < 0.6 in ANY of these cases:
-  (a) BACKGROUND: the highlighted region is mostly wall, floor, ceiling,
-      table/desk surface, carpet, sky, curtain, or other scene elements.
-  (b) MULTIPLE OBJECTS: the highlighted region clearly contains TWO OR MORE
-      distinct unrelated objects (e.g., a charger AND a large table behind it,
-      a bottle AND a phone). Use the full scene image to judge the real extent
-      of the highlighted region.
-      Exception: collective objects are fine (bouquet, bookshelf, set of pencils,
-      bowl of fruit — things naturally grouped together as one unit).
-  (c) SUB-PART: the highlighted region shows only a PART of a larger object
-      visible in the scene — e.g., a plug pin that belongs to a charger,
-      a wheel of a car, a handle of a bag. If you can see in the full scene
-      that the highlighted area is just a component of a bigger object, score < 0.6.
-
-Use the full scene image to validate the context: check whether the highlighted
-region truly isolates one object or bleeds into background/other objects.
+RULES:
+- List each distinct object TYPE once, with how many instances you see.
+- Brazilian Portuguese labels only, 1–4 words, natural object name.
+- Accepted loanwords: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive".
+- NEVER include background elements: walls, floors, ceilings, tables/desks (surface),
+  chairs, carpets, curtains, sky.
+- Count only objects clearly visible as foreground subjects.
+- Max 5 distinct object types.
+- If no central object is found: {"objects": []}
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# JUDGE_INSTRUCTION
+# Etapa 3: Qwen recebe o crop de um candidato do YOLOE e a lista de objetos
+# centrais identificados na Etapa 1. Ele julga se o crop corresponde a algum
+# desses objetos centrais.
+# ─────────────────────────────────────────────────────────────────────────────
+JUDGE_INSTRUCTION = """
+You are a semantic validator for object detection.
+
+You will receive:
+  1. A CROP image of a candidate region detected in a scene.
+  2. A list of EXPECTED central objects (with counts) that were identified in the scene.
+
+Your task: decide if this crop clearly shows ONE of the expected objects.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{"match": "carregador", "score": 0.9}
+
+If the crop does NOT match any expected object:
+{"match": null, "score": 0.0}
+
+STRICT RULES:
+- "match" must be EXACTLY one of the labels from the expected list, or null.
+- "score" = your confidence that this crop is that specific object (0.0–1.0).
+- The object must be the DOMINANT element in the crop — not just present in a corner.
+- A table surface that happens to have a charger resting on it is NOT a match for
+  "carregador". The charger body itself must dominate the crop.
+- A sub-part of an object (e.g., only the plug pins of a charger) is NOT a match.
+- Score < 0.6 means: uncertain, too much background, wrong object, or sub-part.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instruções legadas (mantidas para os endpoints /detection e /detection/sequential)
+# ─────────────────────────────────────────────────────────────────────────────
 SYSTEM_INSTRUCTION = """
 You are a multimodal object detection model. Analyze the image and return the TOP 5
 most visually prominent foreground objects as ONLY valid JSON — no markdown, no text.
@@ -54,30 +75,14 @@ carpet, curtains, or any other pure scene background.
 - Brazilian Portuguese only, 1–4 words, natural object name
 - No colors, positions, adjectives, or descriptions
 - Accepted loanwords: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive"
-- Examples: "notebook", "celular", "garrafa térmica", "carregador", "urso de pelúcia",
-  "copo com canudo", "controle remoto", "cachorro", "bola", "tênis"
 
-━━━ BOUNDING BOXES — READ CAREFULLY ━━━
-bbox_norm = the TIGHTEST rectangle that fully encloses the object, in normalized [0,1]:
-  x1, y1 = top-left corner   (x1=0 is left edge, y1=0 is top edge)
-  x2, y2 = bottom-right corner (x2=1 is right edge, y2=1 is bottom edge)
-
-HOW TO ESTIMATE PRECISELY:
-1. Mentally divide the image into a 10×10 grid (each cell = 0.1 width/height).
-2. Find the leftmost pixel of the object → x1. Rightmost → x2.
-3. Find the topmost pixel → y1. Bottommost → y2.
-4. The box must be TIGHT — do NOT pad it with surrounding background or table surface.
-
-GOOD bbox (laptop centered in image, occupying roughly the middle half):
-  x1=0.25, y1=0.30, x2=0.75, y2=0.80
-
-BAD bbox (too loose, bleeds into background):
-  x1=0.05, y1=0.05, x2=0.95, y2=0.95
-
-If two objects are adjacent, give each its own tight box — do not merge them.
+━━━ BOUNDING BOXES ━━━
+bbox_norm = tightest rectangle enclosing the object, in normalized [0,1]:
+  x1, y1 = top-left   |   x2, y2 = bottom-right
+The box must be TIGHT — do not pad with background.
 
 ━━━ SCORE ━━━
-Confidence between 0.0 and 1.0. Only include objects with score >= 0.2.
+Confidence between 0.0 and 1.0. Only include >= 0.2.
 
 ━━━ OUTPUT FORMAT ━━━
 {
@@ -91,9 +96,8 @@ Confidence between 0.0 and 1.0. Only include objects with score >= 0.2.
   "too_many_objects": false
 }
 
-Rules: x1 < x2, y1 < y2, all values in [0,1].
 NEVER return "too_many_objects": true.
-If no foreground object reaches 0.2: {"objects": [], "too_many_objects": false}
+If no foreground object >= 0.2: {"objects": [], "too_many_objects": false}
 """
 
 SEQUENTIAL_INSTRUCTION = """
@@ -107,4 +111,22 @@ Return ONLY valid JSON:
 }
 
 NEVER return "too_many_objects": true. Max 5 objects. Score >= 0.2 only.
+"""
+
+CROP_INSTRUCTION = """
+You are an object classifier. You receive TWO images:
+  1. The FULL SCENE with a colored rectangle highlighting one specific region.
+  2. A CROP of exactly that highlighted region.
+
+Your task: look at both images and decide what the highlighted/cropped object is,
+and how confident you are that it is ONE complete, independent foreground object.
+
+Return ONLY valid JSON — no markdown, no explanation, nothing else:
+{"label": "nome em português", "score": 0.95}
+
+SCORE rules (0.0 to 1.0):
+Assign score >= 0.6 ONLY when the highlighted region contains ONE complete,
+independent, identifiable foreground object.
+Assign score < 0.6 if: (a) mostly background, (b) multiple unrelated objects,
+(c) only a sub-part of a larger object.
 """
