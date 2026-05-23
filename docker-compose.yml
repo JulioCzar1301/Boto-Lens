@@ -9,7 +9,7 @@ services:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ~/.cache/vllm:/root/.cache/vllm
     environment:
-      - HF_TOKEN=hf_your_token_here
+      - HF_TOKEN=${HF_TOKEN}
     command:
       - "--model"
       - "Qwen/Qwen2.5-VL-14B-Instruct"
