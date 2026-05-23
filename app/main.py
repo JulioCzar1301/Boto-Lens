@@ -226,7 +226,9 @@ async def _call_vllm_legacy(
             ],
         },
     )
-    return response.json()
+    result = response.json()
+    print(f"vLLM status={response.status_code} | response={result}")
+    return result
 
 
 def _bbox_prominence(bbox: BBox) -> float:
