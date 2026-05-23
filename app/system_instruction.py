@@ -10,18 +10,29 @@ foreground objects — the things that are clearly the main subjects of the scen
 Return ONLY valid JSON — no markdown, no explanation:
 {
   "objects": [
-    {"label": "carregador", "count": 1},
-    {"label": "notebook",   "count": 2}
+    {
+      "label": "carregador",
+      "count": 1,
+      "prompts": ["charger", "wall charger", "power adapter", "USB charger", "phone charger", "AC adapter"]
+    },
+    {
+      "label": "notebook",
+      "count": 2,
+      "prompts": ["laptop", "laptop computer", "notebook computer", "open laptop", "macbook"]
+    }
   ]
 }
 
 RULES:
 - List each distinct object TYPE once, with how many instances you see.
-- Brazilian Portuguese labels only, 1–4 words, natural object name.
-- Accepted loanwords: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive".
-- NEVER include background elements: walls, floors, ceilings, tables/desks (surface),
+- "label": Brazilian Portuguese, 1–4 words, natural object name.
+  Accepted loanwords: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive".
+- "count": how many instances of this object are clearly visible.
+- "prompts": 5 to 10 English words/phrases that describe this object for a detection model.
+  Use varied synonyms and compound names (e.g. "wall charger", "USB-C adapter", "power brick").
+  This list will be used as text prompts for YOLOE — make them specific and descriptive.
+- NEVER include background: walls, floors, ceilings, tables/desks (surface),
   chairs, carpets, curtains, sky.
-- Count only objects clearly visible as foreground subjects.
 - Max 5 distinct object types.
 - If no central object is found: {"objects": []}
 """

@@ -37,7 +37,8 @@ def parse_scene_response(vllm_response: dict) -> list[dict]:
     Interpreta a resposta do Qwen da Etapa 1 (identificação de cena).
 
     Returns:
-        Lista de dicts: [{"label": "carregador", "count": 1}, ...]
+        Lista de dicts:
+        [{"label": "carregador", "count": 1, "prompts": ["charger", "wall charger", ...]}, ...]
         Vazia se não houver objetos ou em caso de erro.
     """
     try:
@@ -58,8 +59,13 @@ def parse_scene_response(vllm_response: dict) -> list[dict]:
     for obj in data.get("objects", []):
         label = str(obj.get("label", "")).strip()
         count = int(obj.get("count", 1))
-        if label and count > 0:
-            result.append({"label": label, "count": count})
+        prompts = [str(p).strip() for p in obj.get("prompts", []) if str(p).strip()]
+        if not label or count <= 0:
+            continue
+        # Fallback: se Qwen não gerou prompts, usa o label em inglês simples
+        if not prompts:
+            prompts = [label]
+        result.append({"label": label, "count": count, "prompts": prompts})
 
     log.info(f"Cena identificada: {result}")
     return result
