@@ -4,6 +4,8 @@ WORKDIR /app
 
 # Só instala os pacotes LEVES da sua API
 RUN pip install --timeout=300 fastapi uvicorn[standard] httpx pydantic python-dotenv
+# CLIP é necessário para YOLOE text prompts (get_text_pe)
+RUN pip install --timeout=300 "git+https://github.com/ultralytics/CLIP.git"
 
 COPY app/ .
 
