@@ -21,8 +21,6 @@ services:
       - "4"
       - "--gpu-memory-utilization"
       - "0.95"
-      - "--limit-mm-per-prompt"
-      - "image=1"
     deploy:
       resources:
         reservations:
