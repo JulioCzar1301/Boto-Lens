@@ -10,8 +10,8 @@ services:
       - ~/.cache/vllm:/root/.cache/vllm
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     command:
-      - "--model"
       - "Qwen/Qwen2.5-VL-14B-Instruct"
       - "--dtype"
       - "bfloat16"
