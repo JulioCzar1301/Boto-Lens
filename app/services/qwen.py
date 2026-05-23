@@ -14,42 +14,39 @@ from models import DetectedObject, BBox
 log = logging.getLogger(__name__)
 
 
-def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
-    """
-    Extrai e valida a lista de objetos detectados a partir da resposta do vLLM (Qwen).
-
-    Trata erros de parsing, blocos markdown e o campo 'too_many_objects'.
-
-    Args:
-        vllm_response (dict): Resposta bruta da API do vLLM.
-
-    Returns:
-        list[DetectedObject]: Lista de objetos detectados (vazia em caso de erro ou limite excedido).
-    """
-    print("Resposta bruta do vLLM (Qwen):", json.dumps(vllm_response)[:500])  # Log para debug')
-    try:
-        raw = vllm_response["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError) as e:
-        log.error(f"Resposta vLLM inesperada: {e}")
-        log.error(f"Resposta completa: {json.dumps(vllm_response)}")
-        return []
-
-    # Remove blocos markdown (```json ... ```) se presentes
+def _strip_markdown(raw: str) -> str:
+    """Remove blocos markdown (```json ... ```) se presentes."""
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.strip()
+    return raw
+
+
+def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
+    """
+    Extrai e valida a lista de objetos detectados a partir da resposta do vLLM (Qwen).
+
+    Args:
+        vllm_response (dict): Resposta bruta da API do vLLM.
+
+    Returns:
+        list[DetectedObject]: Lista de até 5 objetos detectados (vazia em caso de erro).
+    """
+    print("Resposta bruta do vLLM (Qwen):", json.dumps(vllm_response)[:500])
+    try:
+        raw = vllm_response["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError) as e:
+        log.error(f"Resposta vLLM inesperada: {e}")
+        return []
+
+    raw = _strip_markdown(raw)
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         log.warning(f"JSON inválido do Qwen: {e}\n{raw[:300]}")
-        return []
-
-    # Verifica se o modelo indicou muitos objetos
-    if data.get("too_many_objects"):
-        log.info("Qwen: too_many_objects=true")
         return []
 
     objects = []
@@ -66,13 +63,19 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
             log.warning(f"Bounding box inválida ignorada: {obj}")
             continue
 
+        score = float(obj.get("score", 0.5))
+        if score < 0.2:
+            continue
+
         objects.append(DetectedObject(
             label=obj.get("label", "objeto"),
-            score=float(obj.get("score", 0.5)),
+            score=score,
             bbox=bbox,
             source="qwen",
         ))
 
+    # Garante no máximo 5, ordenados por score
+    objects = sorted(objects, key=lambda o: o.score, reverse=True)[:5]
     log.info(f"Qwen: {len(objects)} objeto(s) detectado(s)")
     return objects
 
@@ -89,8 +92,7 @@ def parse_qwen_refine_response(
 
     Args:
         vllm_response (dict): Resposta bruta da API do vLLM.
-        yoloe_objects (list[DetectedObject]): Detecções originais do YOLOE
-            (usadas para recuperar a bbox pelo índice).
+        yoloe_objects (list[DetectedObject]): Detecções originais do YOLOE.
 
     Returns:
         list[DetectedObject]: Lista refinada com label do Qwen e bbox do YOLOE.
@@ -99,24 +101,14 @@ def parse_qwen_refine_response(
         raw = vllm_response["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError) as e:
         log.error(f"Resposta vLLM inesperada (refine): {e}")
-        log.error(f"Resposta completa: {json.dumps(vllm_response)}")
         return []
 
-    # Remove blocos markdown se presentes
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
+    raw = _strip_markdown(raw)
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         log.warning(f"JSON inválido do Qwen (refine): {e}\n{raw[:300]}")
-        return []
-
-    if data.get("too_many_objects"):
-        log.info("Qwen (refine): too_many_objects=true")
         return []
 
     objects = []
@@ -127,19 +119,19 @@ def parse_qwen_refine_response(
             continue
 
         yobj = yoloe_objects[idx]
-        label = obj.get("label", yobj.label)
         score = float(obj.get("score", yobj.score))
-
         if score < 0.2:
             continue
 
         objects.append(DetectedObject(
-            label=label,
+            label=obj.get("label", yobj.label),
             score=score,
-            bbox=yobj.bbox,          # coordenadas preservadas do YOLOE
+            bbox=yobj.bbox,
             source="sequential",
             yoloe_conf=yobj.yoloe_conf,
         ))
 
+    # Garante no máximo 5, ordenados por score
+    objects = sorted(objects, key=lambda o: o.score, reverse=True)[:5]
     log.info(f"Qwen (refine): {len(objects)} objeto(s) selecionado(s) do YOLOE")
     return objects
