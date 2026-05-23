@@ -155,6 +155,45 @@ def _remove_subparts(objects: list[DetectedObject]) -> list[DetectedObject]:
     return [o for i, o in enumerate(objects) if i not in to_remove]
 
 
+def _containment(a: BBox, b: BBox) -> float:
+    """Fração da área de A que está dentro de B."""
+    x1, y1 = max(a.x1, b.x1), max(a.y1, b.y1)
+    x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = _bbox_area(a)
+    return inter / area_a if area_a > 0 else 0.0
+
+
+# Limiar de contenção para considerar um objeto sub-parte de outro.
+# Se >60% do bbox de A está dentro do bbox de B, A é sub-parte de B.
+_SUBPART_CONTAINMENT = 0.60
+
+
+def _remove_subparts(objects: list[DetectedObject]) -> list[DetectedObject]:
+    """
+    Remove detecções que são sub-partes de outros objetos detectados na mesma cena.
+
+    Regra: se containment(A em B) > 0.60 E area(A) < area(B)
+           → A está dentro de B e é menor → provavelmente sub-parte → descarta A.
+
+    Exemplo: bbox do "teclado" dentro do bbox do "laptop" → descarta "teclado".
+    """
+    to_remove: set[int] = set()
+    for i, a in enumerate(objects):
+        if i in to_remove:
+            continue
+        for j, b in enumerate(objects):
+            if i == j or j in to_remove:
+                continue
+            if (_containment(a.bbox, b.bbox) > _SUBPART_CONTAINMENT
+                    and _bbox_area(a.bbox) < _bbox_area(b.bbox)):
+                to_remove.add(i)
+                print(f"Sub-parte: '{a.label}' ({_bbox_area(a.bbox):.3f}) "
+                      f"descartado — está dentro de '{b.label}' ({_bbox_area(b.bbox):.3f})")
+                break
+    return [o for i, o in enumerate(objects) if i not in to_remove]
+
+
 def _crop_object(img: Image.Image, bbox: BBox) -> Image.Image:
     """Crop com padding de 5%, sem ultrapassar os limites da imagem."""
     w, h = img.size
@@ -434,7 +473,12 @@ async def detection_fused(body: Prompt) -> dict:
 
     print(f"Após verificação: {len(verified)} objeto(s)")
 
-    # ── Etapa 5: Ranking final ──
+    # ── Etapa 5: Remove sub-partes ──
+    # Ex: "teclado" dentro do bbox do "laptop" → descarta "teclado"
+    verified = _remove_subparts(verified)
+    print(f"Após remoção de sub-partes: {len(verified)} objeto(s)")
+
+    # ── Etapa 6: Ranking final ──
     final = sorted(
         verified,
         key=lambda o: o.score * (0.6 + 0.4 * _centrality(o.bbox)),
