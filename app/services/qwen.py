@@ -31,6 +31,9 @@ def _extract_json(raw: str) -> str:
             raw = raw[4:]
     return raw.strip()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Etapa 1: parse da cena — lista de objetos centrais + quantidades
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _try_fix_json(raw: str) -> str:
     """
@@ -146,7 +149,7 @@ def parse_qwen_response(
         objects.append(DetectedObject(
             label=str(obj.get("label", "objeto")).strip(),
             score=score,
-            bbox=bbox,
+            bbox=BBox(x1=x1, y1=y1, x2=x2, y2=y2),
             source="qwen",
         ))
 

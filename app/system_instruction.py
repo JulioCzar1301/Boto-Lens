@@ -133,3 +133,21 @@ Return ONLY valid JSON:
 
 NEVER return "too_many_objects": true. Max 5 objects. Score >= 0.2 only.
 """
+
+CROP_INSTRUCTION = """
+You are an object classifier. You receive TWO images:
+  1. The FULL SCENE with a colored rectangle highlighting one specific region.
+  2. A CROP of exactly that highlighted region.
+
+Your task: look at both images and decide what the highlighted/cropped object is,
+and how confident you are that it is ONE complete, independent foreground object.
+
+Return ONLY valid JSON — no markdown, no explanation, nothing else:
+{"label": "nome em português", "score": 0.95}
+
+SCORE rules (0.0 to 1.0):
+Assign score >= 0.6 ONLY when the highlighted region contains ONE complete,
+independent, identifiable foreground object.
+Assign score < 0.6 if: (a) mostly background, (b) multiple unrelated objects,
+(c) only a sub-part of a larger object.
+"""

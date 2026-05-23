@@ -32,6 +32,7 @@ Arquitetura /detection/fused:
     score × (0.6 + 0.4 × centralidade) → top 5.
 """
 
+import json
 import math
 import os
 import asyncio
@@ -267,6 +268,79 @@ async def _call_vllm_sequential(
         },
     )
     return response.json()
+
+
+# ──────────────────────────────────────────────
+# Seleção de melhores matches
+# ──────────────────────────────────────────────
+
+def _iou(a: BBox, b: BBox) -> float:
+    x1, y1 = max(a.x1, b.x1), max(a.y1, b.y1)
+    x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    if inter == 0:
+        return 0.0
+    return inter / (_bbox_area(a) + _bbox_area(b) - inter)
+
+
+def _select_best_matches(
+    central_objects: list[dict],
+    candidates: list[DetectedObject],
+    judgments: list[tuple[str | None, float]],
+    iou_dedup: float = 0.25,
+) -> list[DetectedObject]:
+    """
+    Para cada objeto central esperado, seleciona os N melhores candidatos
+    que o Qwen julgou como correspondentes (N = count do objeto central).
+
+    Ranking: score × (0.6 + 0.4 × centralidade).
+    Dedup intra-label: se dois candidatos selecionados tiverem IoU > iou_dedup,
+    mantém apenas o com maior ranking (o primeiro — já está ordenado).
+    """
+    # Agrupa candidatos aprovados por label
+    approved: dict[str, list[tuple[float, DetectedObject]]] = {}
+    for (match_label, score), candidate in zip(judgments, candidates):
+        if match_label is None:
+            continue
+        approved.setdefault(match_label, []).append((score, candidate))
+
+    result: list[DetectedObject] = []
+    for central in central_objects:
+        label = central["label"]
+        count = central["count"]
+
+        group = approved.get(label, [])
+        if not group:
+            print(f"Nenhum candidato aprovado para '{label}'")
+            continue
+
+        # Ordena por score × centralidade (melhor primeiro)
+        ranked = sorted(
+            group,
+            key=lambda t: t[0] * (0.6 + 0.4 * _centrality(t[1].bbox)),
+            reverse=True,
+        )
+
+        selected: list[DetectedObject] = []
+        for score, candidate in ranked:
+            if len(selected) >= count:
+                break
+            # Dedup: descarta se sobrepõe demais com já selecionado
+            overlap = any(_iou(candidate.bbox, s.bbox) > iou_dedup for s in selected)
+            if overlap:
+                print(f"Dedup intra-label: '{label}' bbox descartado por sobreposição")
+                continue
+            selected.append(candidate)
+            result.append(DetectedObject(
+                label=label,
+                score=round(score, 4),
+                bbox=candidate.bbox,
+                source="fused",
+                yoloe_conf=candidate.yoloe_conf,
+            ))
+            print(f"Selecionado: '{label}' score={score:.2f} bbox={candidate.bbox}")
+
+    return result
 
 
 # ──────────────────────────────────────────────
