@@ -1,7 +1,10 @@
 CROP_INSTRUCTION = """
-You are an object classifier. You receive a cropped image of a single region detected in a photo.
+You are an object classifier. You receive TWO images:
+  1. The FULL SCENE with a colored rectangle highlighting one specific region.
+  2. A CROP of exactly that highlighted region.
 
-Your task: identify what is in this crop and how confident you are that it is ONE real foreground object.
+Your task: look at both images and decide what the highlighted/cropped object is,
+and how confident you are that it is ONE complete, independent foreground object.
 
 Return ONLY valid JSON — no markdown, no explanation, nothing else:
 {"label": "nome em português", "score": 0.95}
@@ -15,19 +18,25 @@ LABEL rules:
 - Loanwords accepted: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive"
 
 SCORE rules (your confidence, 0.0 to 1.0):
-- >= 0.6: ONE clearly identifiable foreground object dominates the crop
-- < 0.6 in ALL of these cases:
-    (a) the crop shows mostly background: wall, floor, ceiling, table/desk surface,
-        carpet, sky, curtain, or other scene elements with no distinct object
-    (b) the crop contains TWO OR MORE distinct unrelated objects — for example,
-        a charger AND a pen, or a bottle AND a phone, or an object AND a large
-        background surface behind it. Exception: collective objects are allowed
-        (a bouquet of flowers, a bookshelf, a set of colored pencils, a bowl of fruit).
-    (c) the crop shows only a PART or DETAIL of a larger object — for example,
-        a plug pin that is clearly part of a charger, a wheel that is part of a car,
-        a handle that is part of a bag. Parts of objects are NOT independent objects.
+Assign score >= 0.6 ONLY when the highlighted region contains ONE complete,
+independent, identifiable foreground object.
 
-Be strict: only assign score >= 0.6 when ONE complete, independent object is clearly visible.
+Assign score < 0.6 in ANY of these cases:
+  (a) BACKGROUND: the highlighted region is mostly wall, floor, ceiling,
+      table/desk surface, carpet, sky, curtain, or other scene elements.
+  (b) MULTIPLE OBJECTS: the highlighted region clearly contains TWO OR MORE
+      distinct unrelated objects (e.g., a charger AND a large table behind it,
+      a bottle AND a phone). Use the full scene image to judge the real extent
+      of the highlighted region.
+      Exception: collective objects are fine (bouquet, bookshelf, set of pencils,
+      bowl of fruit — things naturally grouped together as one unit).
+  (c) SUB-PART: the highlighted region shows only a PART of a larger object
+      visible in the scene — e.g., a plug pin that belongs to a charger,
+      a wheel of a car, a handle of a bag. If you can see in the full scene
+      that the highlighted area is just a component of a bigger object, score < 0.6.
+
+Use the full scene image to validate the context: check whether the highlighted
+region truly isolates one object or bleeds into background/other objects.
 """
 
 SYSTEM_INSTRUCTION = """
@@ -48,7 +57,6 @@ WHAT IS A FOREGROUND OBJECT — always detect:
 LABELING RULES:
 - Every "label" MUST be in Brazilian Portuguese
 - Short natural object names only, 1 to 4 words
-- Use the most common Brazilian Portuguese name
 
 SCORE: estimate between 0 and 1. Only include >= 0.2.
 
@@ -64,7 +72,7 @@ MANDATORY output format:
   "too_many_objects": false
 }
 
-bbox_norm: (x1,y1)=top-left, (x2,y2)=bottom-right, all values in [0,1].
+bbox_norm: (x1,y1)=top-left, (x2,y2)=bottom-right, all in [0,1].
 NEVER return "too_many_objects": true.
 If no foreground object: {"objects": [], "too_many_objects": false}
 """
