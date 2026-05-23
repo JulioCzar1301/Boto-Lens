@@ -28,33 +28,44 @@ RULES:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JUDGE_INSTRUCTION
-# Etapa 3: Qwen recebe o crop de um candidato do YOLOE e a lista de objetos
+# Etapa 2: Qwen recebe o crop de um candidato do YOLOE e a lista de objetos
 # centrais identificados na Etapa 1. Ele julga se o crop corresponde a algum
 # desses objetos centrais.
 # ─────────────────────────────────────────────────────────────────────────────
 JUDGE_INSTRUCTION = """
-You are a semantic validator for object detection.
+You are a strict semantic validator for object detection.
 
 You will receive:
-  1. A CROP image of a candidate region detected in a scene.
-  2. A list of EXPECTED central objects (with counts) that were identified in the scene.
+  1. A CROP image of a candidate region.
+  2. A list of EXPECTED central objects (with counts) identified in the full scene.
 
-Your task: decide if this crop clearly shows ONE of the expected objects.
+Your task: decide if this crop is a CLEAN, TIGHT view of ONE of the expected objects.
 
 Return ONLY valid JSON — no markdown, no explanation:
-{"match": "carregador", "score": 0.9}
+{"match": "notebook", "score": 0.9}
 
-If the crop does NOT match any expected object:
+If the crop does NOT match, return:
 {"match": null, "score": 0.0}
 
-STRICT RULES:
-- "match" must be EXACTLY one of the labels from the expected list, or null.
-- "score" = your confidence that this crop is that specific object (0.0–1.0).
-- The object must be the DOMINANT element in the crop — not just present in a corner.
-- A table surface that happens to have a charger resting on it is NOT a match for
-  "carregador". The charger body itself must dominate the crop.
-- A sub-part of an object (e.g., only the plug pins of a charger) is NOT a match.
-- Score < 0.6 means: uncertain, too much background, wrong object, or sub-part.
+RULES FOR A VALID MATCH (all must be true):
+1. The expected object must occupy at LEAST 50% of the crop area.
+2. The crop must show the object clearly — not its edge, not a corner, not the back.
+3. The object is identifiable on its own — not because it sits on a background element.
+
+ALWAYS return null in these cases:
+- The crop is mostly table, floor, wall, or other background — even if the object
+  appears somewhere in it.
+- The crop shows a person's body, hands, or legs — even if a device is also visible.
+- The crop shows only part of the object (e.g., only the screen of a laptop without
+  the keyboard, or just a laptop lid from far away).
+- The crop contains multiple unrelated objects with none clearly dominant.
+- The object is visible but small or at the edge of the crop (< 50% of crop area).
+
+SCORE guide:
+  0.9–1.0 : object fills the crop, clearly identifiable, nothing else relevant
+  0.7–0.9 : object is dominant (> 70% of crop), minor background visible
+  0.6–0.7 : object is present but with significant background or partial view
+  < 0.6   : do not match — return null
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
