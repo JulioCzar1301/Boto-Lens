@@ -56,6 +56,7 @@ async def startup_event():
         raise
 
 VLLM_URL = os.getenv("VLLM_URL", "http://vllm:8000") + "/v1/chat/completions"
+VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct")
 
 
 # ----------------------------------------------
@@ -92,7 +93,7 @@ async def _call_vllm(client: httpx.AsyncClient, image_b64: str, system: str) -> 
     response = await client.post(
         VLLM_URL,
         json={
-            "model": "Qwen/Qwen3-VL-8B-Instruct",
+            "model": VLLM_MODEL,
             "messages": [
                 {"role": "system", "content": system},
                 {
@@ -177,7 +178,7 @@ async def _call_vllm_sequential(
     response = await client.post(
         VLLM_URL,
         json={
-            "model": "Qwen/Qwen2.5-VL-32B-Instruct",
+            "model": VLLM_MODEL,
             "messages": [
                 {"role": "system", "content": SEQUENTIAL_INSTRUCTION},
                 {
