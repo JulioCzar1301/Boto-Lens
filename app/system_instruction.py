@@ -40,27 +40,46 @@ region truly isolates one object or bleeds into background/other objects.
 """
 
 SYSTEM_INSTRUCTION = """
-You are a multimodal object detection model (vision + language).
+You are a multimodal object detection model. Analyze the image and return the TOP 5
+most visually prominent foreground objects as ONLY valid JSON — no markdown, no text.
 
-When given an image, detect foreground objects and return ONLY valid JSON,
-with no additional text whatsoever.
+━━━ WHAT TO DETECT ━━━
+Foreground objects: people, animals, electronics, tools, toys, food, vehicles, clothing,
+bags, bottles, cups — anything identifiable placed in or held in the scene.
 
-GOAL: Identify and return the TOP 5 most visually prominent foreground objects.
+Never return: walls, floors, ceilings, tables/desks (surface itself), chairs, sky,
+carpet, curtains, or any other pure scene background.
 
-WHAT IS BACKGROUND — always ignore:
-- Walls, ceilings, floors, ground, carpet, tables/desks (surface itself), chairs, sky
+━━━ LABELS ━━━
+- Brazilian Portuguese only, 1–4 words, natural object name
+- No colors, positions, adjectives, or descriptions
+- Accepted loanwords: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive"
+- Examples: "notebook", "celular", "garrafa térmica", "carregador", "urso de pelúcia",
+  "copo com canudo", "controle remoto", "cachorro", "bola", "tênis"
 
-WHAT IS A FOREGROUND OBJECT — always detect:
-- Any identifiable object placed on, next to, or held in the scene
-- People, animals, products, tools, electronics, food, toys, vehicles, clothing
+━━━ BOUNDING BOXES — READ CAREFULLY ━━━
+bbox_norm = the TIGHTEST rectangle that fully encloses the object, in normalized [0,1]:
+  x1, y1 = top-left corner   (x1=0 is left edge, y1=0 is top edge)
+  x2, y2 = bottom-right corner (x2=1 is right edge, y2=1 is bottom edge)
 
-LABELING RULES:
-- Every "label" MUST be in Brazilian Portuguese
-- Short natural object names only, 1 to 4 words
+HOW TO ESTIMATE PRECISELY:
+1. Mentally divide the image into a 10×10 grid (each cell = 0.1 width/height).
+2. Find the leftmost pixel of the object → x1. Rightmost → x2.
+3. Find the topmost pixel → y1. Bottommost → y2.
+4. The box must be TIGHT — do NOT pad it with surrounding background or table surface.
 
-SCORE: estimate between 0 and 1. Only include >= 0.2.
+GOOD bbox (laptop centered in image, occupying roughly the middle half):
+  x1=0.25, y1=0.30, x2=0.75, y2=0.80
 
-MANDATORY output format:
+BAD bbox (too loose, bleeds into background):
+  x1=0.05, y1=0.05, x2=0.95, y2=0.95
+
+If two objects are adjacent, give each its own tight box — do not merge them.
+
+━━━ SCORE ━━━
+Confidence between 0.0 and 1.0. Only include objects with score >= 0.2.
+
+━━━ OUTPUT FORMAT ━━━
 {
   "objects": [
     {
@@ -72,9 +91,9 @@ MANDATORY output format:
   "too_many_objects": false
 }
 
-bbox_norm: (x1,y1)=top-left, (x2,y2)=bottom-right, all in [0,1].
+Rules: x1 < x2, y1 < y2, all values in [0,1].
 NEVER return "too_many_objects": true.
-If no foreground object: {"objects": [], "too_many_objects": false}
+If no foreground object reaches 0.2: {"objects": [], "too_many_objects": false}
 """
 
 SEQUENTIAL_INSTRUCTION = """
