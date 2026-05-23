@@ -2,7 +2,7 @@
 API principal para detecção de objetos.
 
 Endpoints:
-- /detection/fused  [PRINCIPAL] Pipeline semântico em 3 etapas
+- /detection/fused  [PRINCIPAL] Pipeline semântico em 4 etapas (Qwen→YOLOE guiado→juiz→seleção)
 - /detection        Qwen autônomo (legado)
 - /detection/sys_prompt  Qwen com prompt customizado (legado)
 - /detection/sequential  YOLOE → Qwen sequencial (legado)
@@ -42,7 +42,7 @@ from system_instruction import (
     SYSTEM_INSTRUCTION, SEQUENTIAL_INSTRUCTION,
 )
 from models import DetectedObject, BBox
-from services.yoloe import run_yoloe, get_yoloe
+from services.yoloe import run_yoloe, run_yoloe_prompted, get_yoloe
 from services.qwen import (
     parse_scene_response, parse_judge_response,
     parse_qwen_response, parse_qwen_refine_response,
@@ -359,43 +359,60 @@ def _select_best_matches(
 @app.post("/detection/fused")
 async def detection_fused(body: Prompt) -> dict:
     """
-    Pipeline semântico principal.
+    Pipeline semântico principal — Qwen coordena, YOLOE guiado refina.
 
-    Etapa 1 (paralelo):
-      a) Qwen: identifica objetos centrais + quantidades (sem bboxes).
-      b) YOLOE: detecta candidatos com bboxes precisas.
+    Etapa 1 — Qwen analisa a cena:
+      Identifica objetos centrais + quantidades + gera prompts em inglês.
+      Ex: {"label": "carregador", "count": 1,
+           "prompts": ["charger", "wall charger", "power adapter", ...]}
 
-    Etapa 2 (paralelo por candidato):
-      Qwen julga cada crop do YOLOE: match com objeto central ou não?
+    Etapa 2 — YOLOE com text prompts:
+      Usa os prompts ingleses do Qwen para guiar a detecção → bboxes precisas
+      e semanticamente alinhadas com o que o Qwen identificou.
 
-    Etapa 3:
-      Seleciona os N melhores candidatos por objeto central (N = count).
-      Ranking por score × centralidade.
+    Etapa 3 — Julgamento paralelo:
+      Para cada crop do YOLOE, Qwen julga: corresponde a um objeto central?
+
+    Etapa 4 — Seleção:
+      Para cada objeto central (respeitando count), seleciona os N melhores
+      candidatos aprovados, com dedup por IoU.
     """
     image_b64 = resize_base64_image(body.image)
     img = b64_to_pil(image_b64)
 
     loop = asyncio.get_event_loop()
 
-    # ── Etapa 1: Qwen (cena) + YOLOE em paralelo ──
+    # ── Etapa 1: Qwen identifica cena + gera prompts ──
     async with httpx.AsyncClient(timeout=120.0) as client:
-        scene_task = _call_scene(client, image_b64)
-        yoloe_task = loop.run_in_executor(None, run_yoloe, img)
-        scene_response, yoloe_objects = await asyncio.gather(scene_task, yoloe_task)
+        scene_response = await _call_scene(client, image_b64)
 
     central_objects = parse_scene_response(scene_response)
     print(f"Objetos centrais: {central_objects}")
-    print(f"YOLOE: {len(yoloe_objects)} candidato(s)")
 
     if not central_objects:
         print("Qwen não identificou objetos centrais na cena.")
         return serialize_detections([], too_many=False)
 
+    # Coleta todos os prompts em inglês gerados pelo Qwen
+    all_prompts = []
+    for obj in central_objects:
+        for p in obj.get("prompts", []):
+            if p not in all_prompts:
+                all_prompts.append(p)
+
+    print(f"Prompts para YOLOE: {all_prompts}")
+
+    # ── Etapa 2: YOLOE guiado pelos prompts do Qwen ──
+    yoloe_objects = await loop.run_in_executor(
+        None, run_yoloe_prompted, img, all_prompts
+    )
+    print(f"YOLOE (prompted): {len(yoloe_objects)} candidato(s)")
+
     if not yoloe_objects:
-        print("YOLOE não detectou candidatos.")
+        print("YOLOE não detectou candidatos com os prompts fornecidos.")
         return serialize_detections([], too_many=False)
 
-    # Filtra candidatos por área (remove ruído e fundo)
+    # Filtra por área
     candidates = [
         o for o in yoloe_objects
         if _MIN_AREA <= _bbox_area(o.bbox) <= _MAX_AREA
@@ -403,7 +420,7 @@ async def detection_fused(body: Prompt) -> dict:
 
     print(f"Candidatos após filtro de área: {len(candidates)}")
 
-    # ── Etapa 2: Qwen julga cada candidato em paralelo ──
+    # ── Etapa 3: Qwen julga cada candidato em paralelo ──
     async with httpx.AsyncClient(timeout=120.0) as client:
         judge_tasks = [
             _call_judge(client, pil_to_b64(_crop_object(img, c.bbox)), central_objects, i)
@@ -416,7 +433,7 @@ async def detection_fused(body: Prompt) -> dict:
     approved_count = sum(1 for m, _ in judgments if m is not None)
     print(f"Candidatos aprovados pelo Qwen: {approved_count}/{len(candidates)}")
 
-    # ── Etapa 3: Seleção dos melhores matches ──
+    # ── Etapa 4: Seleção dos melhores matches ──
     final = _select_best_matches(central_objects, candidates, judgments)
 
     print(f"Resultado final: {len(final)} objeto(s)")
