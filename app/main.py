@@ -444,10 +444,12 @@ async def detection_fused(body: Prompt) -> dict:
 async def detection(body: Prompt) -> dict:
     """Qwen autônomo — labels + bboxes gerados pelo Qwen, sem YOLOE."""
     image_b64 = resize_base64_image(body.image)
+    img = b64_to_pil(image_b64)
     async with httpx.AsyncClient(timeout=120.0) as client:
         return serialize_detections(
             parse_qwen_response(
-                await _call_vllm_legacy(client, image_b64, SYSTEM_INSTRUCTION)
+                await _call_vllm_legacy(client, image_b64, SYSTEM_INSTRUCTION),
+                img_size=img.size,  # (width, height) para normalizar coords em pixel
             ),
             too_many=False,
         )
@@ -457,10 +459,12 @@ async def detection(body: Prompt) -> dict:
 async def detection_sys(body: PromptSys) -> dict:
     """Qwen com prompt customizado."""
     image_b64 = resize_base64_image(body.image)
+    img = b64_to_pil(image_b64)
     async with httpx.AsyncClient(timeout=120.0) as client:
         return serialize_detections(
             parse_qwen_response(
-                await _call_vllm_legacy(client, image_b64, body.prompt)
+                await _call_vllm_legacy(client, image_b64, body.prompt),
+                img_size=img.size,
             ),
             too_many=False,
         )
