@@ -28,7 +28,11 @@ Arquitetura /detection/fused:
     - Qwen confirma/corrige o label e retorna score de confiança.
     - score < 0.6 → objeto descartado.
 
-  Etapa 5 — Ranking final:
+  Etapa 5 — Remove sub-partes:
+    Descarta bboxes cujo interior (>60%) está contido num bbox maior.
+    Ex: "teclado" dentro de "laptop" → descartado.
+
+  Etapa 6 — Ranking final:
     score × (0.6 + 0.4 × centralidade) → top 5.
 """
 
@@ -85,20 +89,13 @@ class PromptSys(BaseModel):
 # Constantes
 # ──────────────────────────────────────────────
 
-# Área normalizada mínima para ser considerado objeto de foreground relevante.
-# Objetos menores que isso são provavelmente detalhes de fundo ou foco secundário.
-_MIN_FOREGROUND_AREA = 0.015   # 1.5 % da imagem
-
-# Área máxima: bbox que cobre mais de 75% da imagem é provavelmente a cena inteira.
-_MAX_FOREGROUND_AREA = 0.75
-
-# Objetos abaixo de _SMALL_AREA E com centralidade abaixo de _SMALL_CENTRALITY
-# são descartados como objetos periféricos de fundo sem foco.
-_SMALL_AREA       = 0.03    # 3 % — pequeno mas não microscópico
-_SMALL_CENTRALITY = 0.25    # muito periférico (canto da imagem)
-
-_CROP_PADDING  = 0.05
-_IOI_THRESHOLD = 0.15   # IoU mínimo para considerar match Qwen↔YOLOE
+_MIN_FOREGROUND_AREA = 0.015   # 1.5 % — abaixo disso é ruído/fundo
+_MAX_FOREGROUND_AREA = 0.75    # 75 % — acima disso é a cena inteira
+_SMALL_AREA          = 0.03    # 3 % — pequeno mas não microscópico
+_SMALL_CENTRALITY    = 0.25    # muito periférico (canto)
+_CROP_PADDING        = 0.05
+_IOI_THRESHOLD       = 0.15    # IoU mínimo para match Qwen↔YOLOE
+_SUBPART_CONTAINMENT = 0.60    # >60% de A dentro de B → A é sub-parte de B
 
 
 # ──────────────────────────────────────────────
@@ -116,43 +113,13 @@ def _centrality(bbox: BBox) -> float:
     return max(0.0, 1.0 - 2 * max(abs(cx - 0.5), abs(cy - 0.5)))
 
 
-def _containment(a: BBox, b: BBox) -> float:
-    """Fração da área de A que está dentro de B."""
+def _iou(a: BBox, b: BBox) -> float:
     x1, y1 = max(a.x1, b.x1), max(a.y1, b.y1)
     x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
     inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    area_a = _bbox_area(a)
-    return inter / area_a if area_a > 0 else 0.0
-
-
-# Limiar de contenção para considerar um objeto sub-parte de outro.
-# Se >60% do bbox de A está dentro do bbox de B, A é sub-parte de B.
-_SUBPART_CONTAINMENT = 0.60
-
-
-def _remove_subparts(objects: list[DetectedObject]) -> list[DetectedObject]:
-    """
-    Remove detecções que são sub-partes de outros objetos detectados na mesma cena.
-
-    Regra: se containment(A em B) > 0.60 E area(A) < area(B)
-           → A está dentro de B e é menor → provavelmente sub-parte → descarta A.
-
-    Exemplo: bbox do "teclado" dentro do bbox do "laptop" → descarta "teclado".
-    """
-    to_remove: set[int] = set()
-    for i, a in enumerate(objects):
-        if i in to_remove:
-            continue
-        for j, b in enumerate(objects):
-            if i == j or j in to_remove:
-                continue
-            if (_containment(a.bbox, b.bbox) > _SUBPART_CONTAINMENT
-                    and _bbox_area(a.bbox) < _bbox_area(b.bbox)):
-                to_remove.add(i)
-                print(f"Sub-parte: '{a.label}' ({_bbox_area(a.bbox):.3f}) "
-                      f"descartado — está dentro de '{b.label}' ({_bbox_area(b.bbox):.3f})")
-                break
-    return [o for i, o in enumerate(objects) if i not in to_remove]
+    if inter == 0:
+        return 0.0
+    return inter / (_bbox_area(a) + _bbox_area(b) - inter)
 
 
 def _containment(a: BBox, b: BBox) -> float:
@@ -164,19 +131,30 @@ def _containment(a: BBox, b: BBox) -> float:
     return inter / area_a if area_a > 0 else 0.0
 
 
-# Limiar de contenção para considerar um objeto sub-parte de outro.
-# Se >60% do bbox de A está dentro do bbox de B, A é sub-parte de B.
-_SUBPART_CONTAINMENT = 0.60
+def _is_foreground(obj: DetectedObject) -> bool:
+    """
+    Retorna True se o objeto deve ser considerado foreground relevante.
+    Descarta:
+      - Objetos muito pequenos (< 1.5% da imagem) → ruído/detalhe de fundo
+      - Objetos que cobrem quase tudo (> 75%) → fundo/cena inteira
+      - Objetos pequenos (< 3%) E muito periféricos → foco secundário improvável
+    """
+    area = _bbox_area(obj.bbox)
+    if area < _MIN_FOREGROUND_AREA:
+        return False
+    if area > _MAX_FOREGROUND_AREA:
+        return False
+    if area < _SMALL_AREA and _centrality(obj.bbox) < _SMALL_CENTRALITY:
+        return False
+    return True
 
 
 def _remove_subparts(objects: list[DetectedObject]) -> list[DetectedObject]:
     """
-    Remove detecções que são sub-partes de outros objetos detectados na mesma cena.
+    Remove detecções que são sub-partes de outros objetos na mesma cena.
 
-    Regra: se containment(A em B) > 0.60 E area(A) < area(B)
-           → A está dentro de B e é menor → provavelmente sub-parte → descarta A.
-
-    Exemplo: bbox do "teclado" dentro do bbox do "laptop" → descarta "teclado".
+    Regra: containment(A em B) > 0.60 E area(A) < area(B) → descarta A.
+    Exemplo: "teclado" bbox dentro do "laptop" bbox → descarta "teclado".
     """
     to_remove: set[int] = set()
     for i, a in enumerate(objects):
@@ -204,6 +182,15 @@ def _crop_object(img: Image.Image, bbox: BBox) -> Image.Image:
     x2 = min(1.0, bbox.x2 + pad_x)
     y2 = min(1.0, bbox.y2 + pad_y)
     return img.crop((int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)))
+
+
+def _bbox_prominence(bbox: BBox) -> float:
+    area = _bbox_area(bbox)
+    area_score = min(1.0, math.sqrt(area) * 2)
+    cx = (bbox.x1 + bbox.x2) / 2
+    cy = (bbox.y1 + bbox.y2) / 2
+    centrality = max(0.0, 1.0 - 2 * max(abs(cx - 0.5), abs(cy - 0.5)))
+    return round(0.6 * area_score + 0.4 * centrality, 4)
 
 
 # ──────────────────────────────────────────────
@@ -280,15 +267,6 @@ async def _call_verify(
     return result
 
 
-def _bbox_prominence(bbox: BBox) -> float:
-    area = _bbox_area(bbox)
-    area_score = min(1.0, math.sqrt(area) * 2)
-    cx = (bbox.x1 + bbox.x2) / 2
-    cy = (bbox.y1 + bbox.y2) / 2
-    centrality = max(0.0, 1.0 - 2 * max(abs(cx - 0.5), abs(cy - 0.5)))
-    return round(0.6 * area_score + 0.4 * centrality, 4)
-
-
 async def _call_vllm_sequential(
     client: httpx.AsyncClient,
     img: Image.Image,
@@ -329,79 +307,6 @@ async def _call_vllm_sequential(
 
 
 # ──────────────────────────────────────────────
-# Seleção de melhores matches
-# ──────────────────────────────────────────────
-
-def _iou(a: BBox, b: BBox) -> float:
-    x1, y1 = max(a.x1, b.x1), max(a.y1, b.y1)
-    x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
-    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    if inter == 0:
-        return 0.0
-    return inter / (_bbox_area(a) + _bbox_area(b) - inter)
-
-
-def _select_best_matches(
-    central_objects: list[dict],
-    candidates: list[DetectedObject],
-    judgments: list[tuple[str | None, float]],
-    iou_dedup: float = 0.25,
-) -> list[DetectedObject]:
-    """
-    Para cada objeto central esperado, seleciona os N melhores candidatos
-    que o Qwen julgou como correspondentes (N = count do objeto central).
-
-    Ranking: score × (0.6 + 0.4 × centralidade).
-    Dedup intra-label: se dois candidatos selecionados tiverem IoU > iou_dedup,
-    mantém apenas o com maior ranking (o primeiro — já está ordenado).
-    """
-    # Agrupa candidatos aprovados por label
-    approved: dict[str, list[tuple[float, DetectedObject]]] = {}
-    for (match_label, score), candidate in zip(judgments, candidates):
-        if match_label is None:
-            continue
-        approved.setdefault(match_label, []).append((score, candidate))
-
-    result: list[DetectedObject] = []
-    for central in central_objects:
-        label = central["label"]
-        count = central["count"]
-
-        group = approved.get(label, [])
-        if not group:
-            print(f"Nenhum candidato aprovado para '{label}'")
-            continue
-
-        # Ordena por score × centralidade (melhor primeiro)
-        ranked = sorted(
-            group,
-            key=lambda t: t[0] * (0.6 + 0.4 * _centrality(t[1].bbox)),
-            reverse=True,
-        )
-
-        selected: list[DetectedObject] = []
-        for score, candidate in ranked:
-            if len(selected) >= count:
-                break
-            # Dedup: descarta se sobrepõe demais com já selecionado
-            overlap = any(_iou(candidate.bbox, s.bbox) > iou_dedup for s in selected)
-            if overlap:
-                print(f"Dedup intra-label: '{label}' bbox descartado por sobreposição")
-                continue
-            selected.append(candidate)
-            result.append(DetectedObject(
-                label=label,
-                score=round(score, 4),
-                bbox=candidate.bbox,
-                source="fused",
-                yoloe_conf=candidate.yoloe_conf,
-            ))
-            print(f"Selecionado: '{label}' score={score:.2f} bbox={candidate.bbox}")
-
-    return result
-
-
-# ──────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────
 
@@ -409,12 +314,6 @@ def _select_best_matches(
 async def detection_fused(body: Prompt) -> dict:
     """
     Pipeline principal: Qwen + YOLOE-zero paralelo → fusão IoU → verificação de crop.
-
-    Etapa 1: Qwen e YOLOE rodam em paralelo.
-    Etapa 2: Filtros de foreground (área + centralidade).
-    Etapa 3: Fusão IoU — YOLOE refina bboxes do Qwen quando há match.
-    Etapa 4: Qwen verifica cada crop → corrige label + score de confiança.
-    Etapa 5: Ranking por score × centralidade → top 5.
     """
     image_b64 = resize_base64_image(body.image)
     img = b64_to_pil(image_b64)
@@ -438,14 +337,13 @@ async def detection_fused(body: Prompt) -> dict:
     # ── Etapa 2: Filtros de foreground ──
     qwen_filtered = [o for o in qwen_objects if _is_foreground(o)]
     if not qwen_filtered:
-        print("Todos os objetos do Qwen foram filtrados como fundo/pequenos — usando todos")
+        print("Todos os objetos do Qwen foram filtrados — usando todos")
         qwen_filtered = qwen_objects
 
     yoloe_filtered = [o for o in yoloe_objects if _is_foreground(o)]
     print(f"Após filtro foreground — Qwen: {len(qwen_filtered)}, YOLOE: {len(yoloe_filtered)}")
 
     # ── Etapa 3: Fusão IoU ──
-    # YOLOE refina bboxes do Qwen quando há match (IoU >= 0.15)
     fused = fuse_by_iou(qwen_filtered, yoloe_filtered, iou_threshold=_IOI_THRESHOLD)
     print(f"Pós-fusão: {len(fused)} objeto(s)")
 
@@ -474,7 +372,6 @@ async def detection_fused(body: Prompt) -> dict:
     print(f"Após verificação: {len(verified)} objeto(s)")
 
     # ── Etapa 5: Remove sub-partes ──
-    # Ex: "teclado" dentro do bbox do "laptop" → descarta "teclado"
     verified = _remove_subparts(verified)
     print(f"Após remoção de sub-partes: {len(verified)} objeto(s)")
 
@@ -484,11 +381,6 @@ async def detection_fused(body: Prompt) -> dict:
         key=lambda o: o.score * (0.6 + 0.4 * _centrality(o.bbox)),
         reverse=True,
     )[:5]
-
-    # ── Etapa 5: Remove sub-partes ──
-    # Ex: "teclado" dentro do bbox do "laptop" → descarta "teclado"
-    final = _remove_subparts(final)
-    print(f"Após remoção de sub-partes: {len(final)} objeto(s)")
 
     print(f"Resultado final: {len(final)} objeto(s)")
     return serialize_detections(final)
