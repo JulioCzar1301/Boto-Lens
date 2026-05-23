@@ -149,7 +149,7 @@ def parse_qwen_response(
         objects.append(DetectedObject(
             label=str(obj.get("label", "objeto")).strip(),
             score=score,
-            bbox=BBox(x1=x1, y1=y1, x2=x2, y2=y2),
+            bbox=bbox,  # _make_bbox já retorna BBox normalizada
             source="qwen",
         ))
 
