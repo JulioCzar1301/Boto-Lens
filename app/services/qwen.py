@@ -1,10 +1,10 @@
 """
-Serviço para parsing da resposta do modelo Qwen (vLLM).
+Serviço para parsing das respostas do modelo Qwen (vLLM).
 
-Funções disponíveis:
-- parse_qwen_response: modo autônomo (Qwen gera bbox + label).
-- parse_qwen_refine_response: modo sequencial (Qwen seleciona do YOLOE e renomeia;
-  coordenadas são preservadas do YOLOE via yoloe_index).
+Funções:
+- parse_crop_response: classifica um crop individual (nova arquitetura).
+- parse_qwen_response: modo autônomo legado (Qwen gera bbox + label).
+- parse_qwen_refine_response: modo sequencial legado.
 """
 
 import json
@@ -13,9 +13,10 @@ from models import DetectedObject, BBox
 
 log = logging.getLogger(__name__)
 
+SCORE_THRESHOLD = 0.6  # Crops com score abaixo disso são descartados
+
 
 def _strip_markdown(raw: str) -> str:
-    """Remove blocos markdown (```json ... ```) se presentes."""
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -24,16 +25,39 @@ def _strip_markdown(raw: str) -> str:
     return raw
 
 
-def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
+def parse_crop_response(vllm_response: dict) -> tuple[str, float]:
     """
-    Extrai e valida a lista de objetos detectados a partir da resposta do vLLM (Qwen).
-
-    Args:
-        vllm_response (dict): Resposta bruta da API do vLLM.
+    Interpreta a resposta do Qwen para classificação de um crop individual.
 
     Returns:
-        list[DetectedObject]: Lista de até 5 objetos detectados (vazia em caso de erro).
+        (label, score) — label em português e score de confiança (0–1).
+        Retorna ("", 0.0) em caso de erro.
     """
+    try:
+        raw = vllm_response["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError) as e:
+        log.error(f"Resposta vLLM inesperada (crop): {e}")
+        return "", 0.0
+
+    raw = _strip_markdown(raw)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.warning(f"JSON inválido do Qwen (crop): {e}\n{raw[:200]}")
+        return "", 0.0
+
+    label = data.get("label", "").strip()
+    score = float(data.get("score", 0.0))
+
+    if not label or score < SCORE_THRESHOLD:
+        return "", score
+
+    return label, score
+
+
+def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
+    """Modo autônomo legado — Qwen gera bbox + label."""
     print("Resposta bruta do vLLM (Qwen):", json.dumps(vllm_response)[:500])
     try:
         raw = vllm_response["choices"][0]["message"]["content"].strip()
@@ -74,29 +98,14 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
             source="qwen",
         ))
 
-    # Garante no máximo 5, ordenados por score
-    objects = sorted(objects, key=lambda o: o.score, reverse=True)[:5]
-    log.info(f"Qwen: {len(objects)} objeto(s) detectado(s)")
-    return objects
+    return sorted(objects, key=lambda o: o.score, reverse=True)[:5]
 
 
 def parse_qwen_refine_response(
     vllm_response: dict,
     yoloe_objects: list[DetectedObject],
 ) -> list[DetectedObject]:
-    """
-    Interpreta a resposta do Qwen no modo sequencial (refinamento sobre YOLOE).
-
-    O Qwen retorna yoloe_index + label + score (sem bbox). As coordenadas são
-    buscadas diretamente de yoloe_objects usando o índice informado.
-
-    Args:
-        vllm_response (dict): Resposta bruta da API do vLLM.
-        yoloe_objects (list[DetectedObject]): Detecções originais do YOLOE.
-
-    Returns:
-        list[DetectedObject]: Lista refinada com label do Qwen e bbox do YOLOE.
-    """
+    """Modo sequencial legado."""
     try:
         raw = vllm_response["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError) as e:
@@ -115,7 +124,6 @@ def parse_qwen_refine_response(
     for obj in data.get("objects", []):
         idx = obj.get("yoloe_index")
         if idx is None or not (0 <= idx < len(yoloe_objects)):
-            log.warning(f"yoloe_index inválido ignorado: {obj}")
             continue
 
         yobj = yoloe_objects[idx]
@@ -131,7 +139,4 @@ def parse_qwen_refine_response(
             yoloe_conf=yobj.yoloe_conf,
         ))
 
-    # Garante no máximo 5, ordenados por score
-    objects = sorted(objects, key=lambda o: o.score, reverse=True)[:5]
-    log.info(f"Qwen (refine): {len(objects)} objeto(s) selecionado(s) do YOLOE")
-    return objects
+    return sorted(objects, key=lambda o: o.score, reverse=True)[:5]
