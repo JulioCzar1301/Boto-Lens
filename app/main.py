@@ -2,20 +2,23 @@
 API principal para detecção de objetos.
 
 Endpoints disponíveis:
-- /detection/fused   [PRINCIPAL] YOLOE detecta bboxes → crop por objeto → Qwen classifica em paralelo
+- /detection/fused   [PRINCIPAL] YOLOE → filtro de contenção → crop → Qwen paralelo
 - /detection         Qwen autônomo (sem YOLOE)
 - /detection/sys_prompt  Qwen com prompt customizado
-- /detection/sequential  Pipeline legado YOLOE → Qwen (mantido para comparação)
+- /detection/sequential  Pipeline legado YOLOE → Qwen
 - /health
 
 Arquitetura do pipeline /detection/fused:
-  1. YOLOE-zero detecta todos os objetos → bboxes precisas.
-  2. Filtra objetos por área mínima (ruído) e máxima (fundo muito grande).
-  3. Para cada bbox, faz um crop da imagem original com padding.
-  4. Todos os crops são enviados ao Qwen em paralelo via asyncio.gather.
-  5. Qwen classifica cada crop individualmente → label em PT-BR + score próprio.
-  6. Crops com score < 60% são descartados (background ou incerteza alta).
-  7. Retorna os até 5 objetos com maior score.
+  1. YOLOE detecta bboxes.
+  2. Filtra por área mínima (ruído) e máxima (fundo muito grande).
+  3. Regra de contenção: se bbox A está ≥70% dentro de bbox B e é menor,
+     A é sub-parte de B (ex: pino de carregador dentro do carregador) → descartado.
+  4. Crop de cada candidato com padding.
+  5. Todos os crops enviados ao Qwen em paralelo via asyncio.gather.
+  6. Qwen classifica cada crop individualmente:
+     - score < 0.6 → descartado (fundo, sub-parte, múltiplos objetos no crop)
+  7. Deduplicação pós-Qwen: IoU > 0.3 entre resultados → fica o de maior score.
+  8. Retorna top 5 por score.
 """
 
 import math
@@ -67,36 +70,96 @@ class PromptSys(BaseModel):
 
 
 # ──────────────────────────────────────────────
-# Constantes de filtragem
+# Constantes
 # ──────────────────────────────────────────────
 
-# Objetos menores que 0.5% da imagem → ruído
-_MIN_AREA = 0.005
-# Objetos maiores que 75% da imagem → provavelmente fundo (parede, chão, mesa inteira)
-_MAX_AREA = 0.75
-# Padding ao redor do crop (fração do tamanho da bbox)
-_CROP_PADDING = 0.05
+_MIN_AREA      = 0.005   # < 0.5% da imagem → ruído
+_MAX_AREA      = 0.75    # > 75% da imagem → provavelmente fundo
+_CROP_PADDING  = 0.05    # padding ao redor do crop
+_CONTAINMENT_T = 0.70    # A está ≥70% dentro de B → A é sub-parte de B
+_IOU_DEDUP_T   = 0.30    # IoU pós-Qwen: > 0.3 → mantém o de maior score
 
 
 # ──────────────────────────────────────────────
-# Helpers
+# Funções auxiliares de geometria
 # ──────────────────────────────────────────────
 
 def _bbox_area(bbox: BBox) -> float:
     return max(0.0, (bbox.x2 - bbox.x1) * (bbox.y2 - bbox.y1))
 
 
+def _intersection_area(a: BBox, b: BBox) -> float:
+    x1 = max(a.x1, b.x1)
+    y1 = max(a.y1, b.y1)
+    x2 = min(a.x2, b.x2)
+    y2 = min(a.y2, b.y2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    return (x2 - x1) * (y2 - y1)
+
+
+def _containment(a: BBox, b: BBox) -> float:
+    """Fração da área de A que está dentro de B (0–1)."""
+    area_a = _bbox_area(a)
+    if area_a == 0:
+        return 0.0
+    return _intersection_area(a, b) / area_a
+
+
+def _filter_contained(objects: list[DetectedObject]) -> list[DetectedObject]:
+    """
+    Remove bboxes que são sub-partes de outras bboxes maiores.
+
+    Regra: se A está ≥70% contido em B e area(A) < area(B),
+    A é provavelmente um componente de B (ex: pino do carregador dentro do carregador)
+    e deve ser descartado antes de ir ao Qwen.
+    """
+    to_remove = set()
+    for i, a in enumerate(objects):
+        for j, b in enumerate(objects):
+            if i == j or j in to_remove:
+                continue
+            if _containment(a.bbox, b.bbox) >= _CONTAINMENT_T and \
+               _bbox_area(a.bbox) < _bbox_area(b.bbox):
+                to_remove.add(i)
+                print(f"Contenção: objeto {i} (área={_bbox_area(a.bbox):.3f}) "
+                      f"descartado por estar dentro de {j} (área={_bbox_area(b.bbox):.3f})")
+                break
+    return [obj for i, obj in enumerate(objects) if i not in to_remove]
+
+
+def _deduplicate_results(objects: list[DetectedObject]) -> list[DetectedObject]:
+    """
+    Remove detecções sobrepostas após a classificação pelo Qwen.
+
+    Se dois resultados têm IoU > 0.3, mantém apenas o de maior score.
+    (Garante que a mesa com carregador sobrepostos, o carregador preciso vença.)
+    """
+    sorted_objs = sorted(objects, key=lambda o: o.score, reverse=True)
+    kept: list[DetectedObject] = []
+    for obj in sorted_objs:
+        overlap = any(obj.bbox.iou(k.bbox) > _IOU_DEDUP_T for k in kept)
+        if not overlap:
+            kept.append(obj)
+        else:
+            print(f"Dedup pós-Qwen: '{obj.label}' (score={obj.score:.2f}) "
+                  f"descartado por sobreposição com resultado de maior score")
+    return kept
+
+
+# ──────────────────────────────────────────────
+# Crop e chamada ao Qwen
+# ──────────────────────────────────────────────
+
 def _crop_object(img: Image.Image, bbox: BBox) -> Image.Image:
     """Recorta a região da bbox com padding, sem sair dos limites da imagem."""
     w, h = img.size
     pad_x = (bbox.x2 - bbox.x1) * _CROP_PADDING
     pad_y = (bbox.y2 - bbox.y1) * _CROP_PADDING
-
     x1 = max(0.0, bbox.x1 - pad_x)
     y1 = max(0.0, bbox.y1 - pad_y)
     x2 = min(1.0, bbox.x2 + pad_x)
     y2 = min(1.0, bbox.y2 + pad_y)
-
     return img.crop((int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)))
 
 
@@ -107,7 +170,10 @@ async def _classify_crop(
 ) -> DetectedObject | None:
     """
     Envia o crop de um objeto ao Qwen para classificação individual.
-    Retorna None se o score for < 60% (background ou incerteza alta).
+
+    Descarta se:
+    - score < 60% (fundo, sub-parte, ou múltiplos objetos no crop)
+    - erro na resposta
     """
     crop = _crop_object(img, obj.bbox)
     crop_b64 = pil_to_b64(crop)
@@ -122,10 +188,8 @@ async def _classify_crop(
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{crop_b64}"},
-                            },
+                            {"type": "image_url",
+                             "image_url": {"url": f"data:image/jpeg;base64,{crop_b64}"}},
                             {"type": "text", "text": "O que é este objeto?"},
                         ],
                     },
@@ -140,7 +204,7 @@ async def _classify_crop(
 
     label, score = parse_crop_response(result)
     if not label:
-        print(f"Crop descartado (score={score:.2f}): bbox={obj.bbox}")
+        print(f"Crop descartado: score={score:.2f}, bbox={obj.bbox}")
         return None
 
     print(f"Crop classificado: '{label}' score={score:.2f}")
@@ -160,22 +224,14 @@ async def _call_vllm(client: httpx.AsyncClient, image_b64: str, system: str) -> 
             "model": VLLM_MODEL,
             "messages": [
                 {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Descreva essa imagem"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                    ],
-                },
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Descreva essa imagem"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                ]},
             ],
         },
     )
-    result = response.json()
-    print(f"vLLM Response Status: {response.status_code}")
-    return result
-
-
-_MIN_AREA_FRACTION = 0.005
+    return response.json()
 
 
 def _bbox_prominence(bbox: BBox) -> float:
@@ -195,23 +251,20 @@ async def _call_vllm_sequential(
     import json as _json
     filtered = [
         (i, obj) for i, obj in enumerate(yoloe_objects)
-        if _bbox_area(obj.bbox) >= _MIN_AREA_FRACTION
+        if _bbox_area(obj.bbox) >= 0.005
     ] or list(enumerate(yoloe_objects))
 
     clean_b64 = pil_to_b64(img)
     yoloe_payload = _json.dumps(
-        [{
-            "index": i,
-            "label": obj.label,
-            "conf": round(obj.yoloe_conf or obj.score, 4),
-            "bbox_norm": {"x1": round(obj.bbox.x1, 4), "y1": round(obj.bbox.y1, 4),
-                          "x2": round(obj.bbox.x2, 4), "y2": round(obj.bbox.y2, 4)},
-            "area": round(_bbox_area(obj.bbox), 4),
-            "prominence": _bbox_prominence(obj.bbox),
-        } for i, obj in filtered],
+        [{"index": i, "label": obj.label,
+          "conf": round(obj.yoloe_conf or obj.score, 4),
+          "bbox_norm": {"x1": round(obj.bbox.x1, 4), "y1": round(obj.bbox.y1, 4),
+                        "x2": round(obj.bbox.x2, 4), "y2": round(obj.bbox.y2, 4)},
+          "area": round(_bbox_area(obj.bbox), 4),
+          "prominence": _bbox_prominence(obj.bbox)}
+         for i, obj in filtered],
         ensure_ascii=False,
     )
-
     response = await client.post(
         VLLM_URL,
         json={
@@ -220,7 +273,6 @@ async def _call_vllm_sequential(
                 {"role": "system", "content": SEQUENTIAL_INSTRUCTION},
                 {"role": "user", "content": [
                     {"type": "text", "text": (
-                        "Original photo (no annotations).\n\n"
                         f"YOLOE detections:\n{yoloe_payload}\n\n"
                         "Select the most prominent foreground objects and rename in Brazilian Portuguese."
                     )},
@@ -239,58 +291,59 @@ async def _call_vllm_sequential(
 @app.post("/detection/fused")
 async def detection_fused(body: Prompt) -> dict:
     """
-    Pipeline principal: YOLOE → crop por objeto → Qwen classifica em paralelo.
+    Pipeline principal: YOLOE → contenção → crop → Qwen paralelo → dedup.
 
-    1. YOLOE detecta bboxes (labels ignorados).
-    2. Filtra por área mínima (ruído) e máxima (fundo).
-    3. Crop de cada objeto com padding.
-    4. Todos os crops enviados ao Qwen em paralelo.
-    5. Qwen dá label em PT-BR + score próprio por crop.
-    6. Score < 60% → descartado.
-    7. Retorna os top 5 por score.
+    Filtros aplicados:
+    1. Área: 0.5% ≤ área ≤ 75% da imagem
+    2. Contenção: bbox ≥70% dentro de outra maior → sub-parte → descartado
+    3. Qwen score < 60% → fundo, sub-parte ou múltiplos objetos no crop → descartado
+    4. IoU pós-Qwen > 0.3 → mantém o de maior score
     """
     image_b64 = resize_base64_image(body.image)
     img = b64_to_pil(image_b64)
 
-    # Etapa 1: YOLOE detecta bboxes
     loop = asyncio.get_event_loop()
     yoloe_objects = await loop.run_in_executor(None, run_yoloe, img)
 
     if not yoloe_objects:
         return serialize_detections([], too_many=False)
 
-    # Etapa 2: filtra por área (remove ruído e objetos gigantes de fundo)
+    # Filtro 1: área
     candidates = [
         obj for obj in yoloe_objects
         if _MIN_AREA <= _bbox_area(obj.bbox) <= _MAX_AREA
-    ]
+    ] or yoloe_objects
+
+    # Filtro 2: contenção (remove sub-partes)
+    candidates = _filter_contained(candidates)
+
+    print(f"YOLOE: {len(yoloe_objects)} → após filtros: {len(candidates)} candidatos")
 
     if not candidates:
-        candidates = yoloe_objects  # fallback sem filtro
+        return serialize_detections([], too_many=False)
 
-    print(f"YOLOE: {len(yoloe_objects)} detecções → {len(candidates)} candidatos após filtro de área")
-
-    # Etapa 3+4: crop + classificação Qwen em paralelo
+    # Filtro 3: Qwen em paralelo por crop
     async with httpx.AsyncClient(timeout=120.0) as client:
         tasks = [_classify_crop(client, img, obj) for obj in candidates]
         results = await asyncio.gather(*tasks)
 
-    # Etapa 5: filtra None (score < 60%) e pega top 5
-    final = [r for r in results if r is not None]
-    final = sorted(final, key=lambda o: o.score, reverse=True)[:5]
+    classified = [r for r in results if r is not None]
 
-    print(f"Resultado final: {len(final)} objeto(s) com score >= 60%")
+    # Filtro 4: deduplicação pós-Qwen por IoU
+    final = _deduplicate_results(classified)
+    final = final[:5]
+
+    print(f"Resultado final: {len(final)} objeto(s)")
     return serialize_detections(final)
 
 
 @app.post("/detection")
 async def detection(body: Prompt) -> dict:
-    """Qwen autônomo (sem YOLOE) — gera bbox + label direto."""
+    """Qwen autônomo sem YOLOE."""
     image_b64 = resize_base64_image(body.image)
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, SYSTEM_INSTRUCTION)
-        qwen_objects = parse_qwen_response(qwen_response)
-        return serialize_detections(qwen_objects, too_many=False)
+        return serialize_detections(parse_qwen_response(qwen_response), too_many=False)
 
 
 @app.post("/detection/sys_prompt")
@@ -299,26 +352,23 @@ async def detection_sys(body: PromptSys) -> dict:
     image_b64 = resize_base64_image(body.image)
     async with httpx.AsyncClient(timeout=120.0) as client:
         qwen_response = await _call_vllm(client, image_b64, body.prompt)
-        qwen_objects = parse_qwen_response(qwen_response)
-        return serialize_detections(qwen_objects, too_many=False)
+        return serialize_detections(parse_qwen_response(qwen_response), too_many=False)
 
 
 @app.post("/detection/sequential")
 async def detection_sequential(body: Prompt) -> dict:
-    """Pipeline legado: YOLOE → Qwen refina lista completa. Mantido para comparação."""
+    """Pipeline legado YOLOE → Qwen refina lista completa."""
     image_b64 = resize_base64_image(body.image)
     img = b64_to_pil(image_b64)
     loop = asyncio.get_event_loop()
     yoloe_objects = await loop.run_in_executor(None, run_yoloe, img)
-
     if not yoloe_objects:
         return serialize_detections([], too_many=False)
-
     async with httpx.AsyncClient(timeout=120.0) as client:
         vllm_response = await _call_vllm_sequential(client, img, yoloe_objects)
-
-    refined = parse_qwen_refine_response(vllm_response, yoloe_objects)
-    return serialize_detections(refined)
+    return serialize_detections(
+        parse_qwen_refine_response(vllm_response, yoloe_objects)
+    )
 
 
 @app.get("/health")
