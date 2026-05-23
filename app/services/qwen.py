@@ -110,8 +110,39 @@ def parse_judge_response(vllm_response: dict) -> tuple[str | None, float]:
 # Legado — /detection (Qwen autônomo)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
-    """Modo autônomo legado — Qwen gera bbox + label."""
+def _normalize_coord(v: float, dim: int) -> float:
+    """Normaliza coordenada: se > 1.0, assume pixels e divide pela dimensão."""
+    return v / dim if v > 1.0 else v
+
+
+def _try_fix_json(raw: str) -> str:
+    """
+    Tenta reparar JSON malformado comum do Qwen2.5-VL:
+    - Remove vírgulas duplas / valores extras (ex: "x2": 195, 260)
+    - Remove trailing commas antes de } ou ]
+    """
+    import re
+    # Remove valores extras após vírgula dentro de bbox: "x2": 195, 260, → "x2": 195,
+    raw = re.sub(r'("x[12]":\s*[\d.]+),\s*[\d.]+\s*,', r'\1,', raw)
+    raw = re.sub(r'("y[12]":\s*[\d.]+),\s*[\d.]+\s*,', r'\1,', raw)
+    # Remove trailing commas antes de } ou ]
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    return raw
+
+
+def parse_qwen_response(
+    vllm_response: dict,
+    img_size: tuple[int, int] | None = None,
+) -> list[DetectedObject]:
+    """
+    Modo autônomo — Qwen gera bbox + label.
+
+    Args:
+        vllm_response: Resposta bruta do vLLM.
+        img_size: (width, height) da imagem enviada ao Qwen.
+                  Necessário para normalizar coords em pixel para [0,1].
+                  Se None, assume que coords já são normalizadas.
+    """
     try:
         raw = vllm_response["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError) as e:
@@ -120,22 +151,55 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
 
     raw = _extract_json(raw)
 
+    # Tentativa 1: parse direto
+    data = None
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        log.warning(f"parse_qwen_response: JSON inválido — {e}\n{raw[:300]}")
-        return []
+    except json.JSONDecodeError:
+        pass
+
+    # Tentativa 2: repara JSON e tenta de novo
+    if data is None:
+        fixed = _try_fix_json(raw)
+        try:
+            data = json.loads(fixed)
+            log.info("parse_qwen_response: JSON reparado com sucesso")
+        except json.JSONDecodeError as e:
+            log.warning(f"parse_qwen_response: JSON inválido mesmo após reparo — {e}\n{raw[:300]}")
+            return []
+
+    img_w, img_h = img_size if img_size else (1, 1)
 
     objects = []
     for obj in data.get("objects", []):
         bb = obj.get("bbox_norm", {})
         try:
-            bbox = BBox(
-                x1=float(bb["x1"]), y1=float(bb["y1"]),
-                x2=float(bb["x2"]), y2=float(bb["y2"]),
-            )
+            x1_raw = float(bb["x1"])
+            y1_raw = float(bb["y1"])
+            x2_raw = float(bb["x2"])
+            y2_raw = float(bb["y2"])
         except (KeyError, TypeError, ValueError):
             log.warning(f"Bbox inválida ignorada: {obj}")
+            continue
+
+        # Detecta se são coords em pixel (qualquer valor > 1.0) e normaliza
+        if any(v > 1.0 for v in [x1_raw, y1_raw, x2_raw, y2_raw]):
+            x1 = _normalize_coord(x1_raw, img_w)
+            y1 = _normalize_coord(y1_raw, img_h)
+            x2 = _normalize_coord(x2_raw, img_w)
+            y2 = _normalize_coord(y2_raw, img_h)
+            log.info(f"Coords em pixel detectadas e normalizadas: ({x1_raw},{y1_raw},{x2_raw},{y2_raw}) → ({x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f})")
+        else:
+            x1, y1, x2, y2 = x1_raw, y1_raw, x2_raw, y2_raw
+
+        # Garante x1<x2 e y1<y2 e valores em [0,1]
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+        x1, y1 = max(0.0, x1), max(0.0, y1)
+        x2, y2 = min(1.0, x2), min(1.0, y2)
+
+        if x2 <= x1 or y2 <= y1:
+            log.warning(f"Bbox degenerada ignorada: {obj}")
             continue
 
         score = float(obj.get("score", 0.5))
@@ -145,7 +209,7 @@ def parse_qwen_response(vllm_response: dict) -> list[DetectedObject]:
         objects.append(DetectedObject(
             label=obj.get("label", "objeto"),
             score=score,
-            bbox=bbox,
+            bbox=BBox(x1=x1, y1=y1, x2=x2, y2=y2),
             source="qwen",
         ))
 
