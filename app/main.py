@@ -116,24 +116,43 @@ def _centrality(bbox: BBox) -> float:
     return max(0.0, 1.0 - 2 * max(abs(cx - 0.5), abs(cy - 0.5)))
 
 
-def _is_foreground(obj: DetectedObject) -> bool:
-    """
-    Retorna True se o objeto provavelmente é um objeto de primeiro plano relevante.
+def _containment(a: BBox, b: BBox) -> float:
+    """Fração da área de A que está dentro de B."""
+    x1, y1 = max(a.x1, b.x1), max(a.y1, b.y1)
+    x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = _bbox_area(a)
+    return inter / area_a if area_a > 0 else 0.0
 
-    Descarta:
-    - Objetos com área < 1.5% (ruído ou detalhe mínimo).
-    - Objetos com área > 75% (a cena/fundo inteiro).
-    - Objetos pequenos (< 3%) E muito periféricos (centralidade < 0.25):
-      provavelmente são objetos de fundo que o usuário não está focando.
+
+# Limiar de contenção para considerar um objeto sub-parte de outro.
+# Se >60% do bbox de A está dentro do bbox de B, A é sub-parte de B.
+_SUBPART_CONTAINMENT = 0.60
+
+
+def _remove_subparts(objects: list[DetectedObject]) -> list[DetectedObject]:
     """
-    area = _bbox_area(obj.bbox)
-    if area < _MIN_FOREGROUND_AREA:
-        return False
-    if area > _MAX_FOREGROUND_AREA:
-        return False
-    if area < _SMALL_AREA and _centrality(obj.bbox) < _SMALL_CENTRALITY:
-        return False
-    return True
+    Remove detecções que são sub-partes de outros objetos detectados na mesma cena.
+
+    Regra: se containment(A em B) > 0.60 E area(A) < area(B)
+           → A está dentro de B e é menor → provavelmente sub-parte → descarta A.
+
+    Exemplo: bbox do "teclado" dentro do bbox do "laptop" → descarta "teclado".
+    """
+    to_remove: set[int] = set()
+    for i, a in enumerate(objects):
+        if i in to_remove:
+            continue
+        for j, b in enumerate(objects):
+            if i == j or j in to_remove:
+                continue
+            if (_containment(a.bbox, b.bbox) > _SUBPART_CONTAINMENT
+                    and _bbox_area(a.bbox) < _bbox_area(b.bbox)):
+                to_remove.add(i)
+                print(f"Sub-parte: '{a.label}' ({_bbox_area(a.bbox):.3f}) "
+                      f"descartado — está dentro de '{b.label}' ({_bbox_area(b.bbox):.3f})")
+                break
+    return [o for i, o in enumerate(objects) if i not in to_remove]
 
 
 def _crop_object(img: Image.Image, bbox: BBox) -> Image.Image:
@@ -421,6 +440,11 @@ async def detection_fused(body: Prompt) -> dict:
         key=lambda o: o.score * (0.6 + 0.4 * _centrality(o.bbox)),
         reverse=True,
     )[:5]
+
+    # ── Etapa 5: Remove sub-partes ──
+    # Ex: "teclado" dentro do bbox do "laptop" → descarta "teclado"
+    final = _remove_subparts(final)
+    print(f"Após remoção de sub-partes: {len(final)} objeto(s)")
 
     print(f"Resultado final: {len(final)} objeto(s)")
     return serialize_detections(final)
