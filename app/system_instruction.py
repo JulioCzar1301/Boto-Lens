@@ -1,86 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# SCENE_INSTRUCTION
-# Etapa 1: Qwen olha a imagem completa e lista os objetos centrais + quantidades.
-# NÃO gera bboxes — apenas interpretação semântica da cena.
-# ─────────────────────────────────────────────────────────────────────────────
-SCENE_INSTRUCTION = """
-You are a scene understanding model. Look at the image and identify the CENTRAL
-foreground objects — the things that are clearly the main subjects of the scene.
-
-Return ONLY valid JSON — no markdown, no explanation:
-{
-  "objects": [
-    {
-      "label": "carregador",
-      "count": 1,
-      "prompts": ["charger", "wall charger", "power adapter", "USB charger", "phone charger", "AC adapter"]
-    },
-    {
-      "label": "notebook",
-      "count": 2,
-      "prompts": ["laptop", "laptop computer", "notebook computer", "open laptop", "macbook"]
-    }
-  ]
-}
-
-RULES:
-- List each distinct object TYPE once, with how many instances you see.
-- "label": Brazilian Portuguese, 1–4 words, natural object name.
-  Accepted loanwords: "notebook", "tablet", "mouse", "smartphone", "carregador", "pen drive".
-- "count": how many instances of this object are clearly visible.
-- "prompts": 5 to 10 English words/phrases that describe this object for a detection model.
-  Use varied synonyms and compound names (e.g. "wall charger", "USB-C adapter", "power brick").
-  This list will be used as text prompts for YOLOE — make them specific and descriptive.
-- NEVER include background: walls, floors, ceilings, tables/desks (surface),
-  chairs, carpets, curtains, sky.
-- Max 5 distinct object types.
-- If no central object is found: {"objects": []}
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# JUDGE_INSTRUCTION
-# Etapa 2: Qwen recebe o crop de um candidato do YOLOE e a lista de objetos
-# centrais identificados na Etapa 1. Ele julga se o crop corresponde a algum
-# desses objetos centrais.
-# ─────────────────────────────────────────────────────────────────────────────
-JUDGE_INSTRUCTION = """
-You are a strict semantic validator for object detection.
-
-You will receive:
-  1. A CROP image of a candidate region.
-  2. A list of EXPECTED central objects (with counts) identified in the full scene.
-
-Your task: decide if this crop is a CLEAN, TIGHT view of ONE of the expected objects.
-
-Return ONLY valid JSON — no markdown, no explanation:
-{"match": "notebook", "score": 0.9}
-
-If the crop does NOT match, return:
-{"match": null, "score": 0.0}
-
-RULES FOR A VALID MATCH (all must be true):
-1. The expected object must occupy at LEAST 50% of the crop area.
-2. The crop must show the object clearly — not its edge, not a corner, not the back.
-3. The object is identifiable on its own — not because it sits on a background element.
-
-ALWAYS return null in these cases:
-- The crop is mostly table, floor, wall, or other background — even if the object
-  appears somewhere in it.
-- The crop shows a person's body, hands, or legs — even if a device is also visible.
-- The crop shows only part of the object (e.g., only the screen of a laptop without
-  the keyboard, or just a laptop lid from far away).
-- The crop contains multiple unrelated objects with none clearly dominant.
-- The object is visible but small or at the edge of the crop (< 50% of crop area).
-
-SCORE guide:
-  0.9–1.0 : object fills the crop, clearly identifiable, nothing else relevant
-  0.7–0.9 : object is dominant (> 70% of crop), minor background visible
-  0.6–0.7 : object is present but with significant background or partial view
-  < 0.6   : do not match — return null
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Instruções legadas (mantidas para os endpoints /detection e /detection/sequential)
+# SYSTEM_INSTRUCTION
+# Etapa 1: Qwen detecta objetos na imagem completa e gera bboxes.
+# Qwen2.5-VL retorna coords em pixel — normalize pelo tamanho da imagem.
 # ─────────────────────────────────────────────────────────────────────────────
 SYSTEM_INSTRUCTION = """
 You are a multimodal visual grounding and object localization model.
@@ -109,6 +30,7 @@ WHAT TO IGNORE:
 - Tables, desks, counters, shelves, beds, and other support surfaces, unless the surface itself is the main subject.
 - Shadows, reflections, printed patterns, textures, and background regions.
 - Large support objects that only serve as context for smaller objects.
+- Objects that are clearly in the background or far from the camera.
 
 BOUNDING BOX RULES:
 - bbox_norm must tightly enclose only the visible part of the physical object.
@@ -166,6 +88,39 @@ If no foreground object is found, return:
 }
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# VERIFY_INSTRUCTION
+# Etapa final: Qwen recebe o crop de um bbox já fundido (Qwen+YOLOE) e
+# verifica/corrige o nome do objeto. Chamada leve — apenas nomenclatura.
+# ─────────────────────────────────────────────────────────────────────────────
+VERIFY_INSTRUCTION = """
+You receive a crop of an object detected in a scene.
+Your task: identify what this object is and confirm it is a real, identifiable foreground object.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{"label": "nome em português", "score": 0.9}
+
+LABEL rules:
+- Brazilian Portuguese only, 1–4 words, natural object name.
+- No colors, positions, descriptions, or adjectives.
+- Examples: "carregador", "notebook", "garrafa", "celular", "controle remoto", "copo", "mouse".
+
+SCORE rules (0.0–1.0):
+- 0.8–1.0: clearly one identifiable object fills most of the crop.
+- 0.6–0.8: object is present and identifiable but with some background.
+- < 0.6: return this score if the crop is ambiguous, background, a sub-part,
+  or contains multiple unrelated objects.
+
+Return score < 0.6 if:
+  (a) The crop is mostly background, table surface, wall, or floor.
+  (b) The crop shows multiple distinct unrelated objects with none dominant.
+  (c) The crop shows only a sub-part of a larger object (plug pin, wheel, handle).
+  (d) The object is unidentifiable or too blurry.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legado — /detection/sequential
+# ─────────────────────────────────────────────────────────────────────────────
 SEQUENTIAL_INSTRUCTION = """
 You are a multimodal vision model. Select the TOP 5 most prominent foreground objects
 from the YOLOE detections provided. Ignore background. Rewrite every label in Brazilian Portuguese.

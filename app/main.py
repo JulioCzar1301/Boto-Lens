@@ -2,30 +2,34 @@
 API principal para detecção de objetos.
 
 Endpoints:
-- /detection/fused  [PRINCIPAL] Pipeline semântico em 4 etapas (Qwen→YOLOE guiado→juiz→seleção)
-- /detection        Qwen autônomo (legado)
-- /detection/sys_prompt  Qwen com prompt customizado (legado)
-- /detection/sequential  YOLOE → Qwen sequencial (legado)
+- /detection/fused  [PRINCIPAL] Qwen + YOLOE-zero paralelo → fusão IoU → verificação de crop
+- /detection        Qwen autônomo
+- /detection/sys_prompt  Qwen com prompt customizado
+- /detection/sequential  Pipeline legado
 - /health
 
-Arquitetura /detection/fused — pipeline semântico:
+Arquitetura /detection/fused:
 
   Etapa 1 (paralelo):
-    a) Qwen analisa a imagem completa → lista objetos centrais + quantidades
-       Ex: [{"label": "carregador", "count": 1}, {"label": "notebook", "count": 1}]
-       Qwen NÃO gera bboxes nesta etapa — apenas interpretação semântica.
-    b) YOLOE detecta todos os candidatos com bboxes precisas (labels ignorados).
+    a) Qwen detecta objetos + gera bboxes na imagem completa.
+    b) YOLOE-zero detecta candidatos com bboxes precisas.
 
-  Etapa 2:
-    Para cada candidato do YOLOE (filtrado por área), Qwen julga em paralelo:
-    "Este crop corresponde a algum dos objetos centrais identificados?"
-    → {"match": "carregador", "score": 0.9} ou {"match": null, "score": 0.0}
+  Etapa 2 — Filtros pré-fusão:
+    - Área: remove objetos < 1.5% (ruído/fundo) ou > 75% (cena inteira).
+    - Centralidade + área combinadas: objetos muito pequenos E periféricos
+      provavelmente não são o foco do usuário.
 
-  Etapa 3 — Seleção:
-    Para cada objeto central esperado (com sua contagem):
-    - Filtra candidatos julgados como correspondentes
-    - Seleciona os N melhores por score (respeitando a contagem)
-    - Resultado: bbox precisa do YOLOE + label semântico do Qwen
+  Etapa 3 — Fusão IoU (Qwen coordena, YOLOE refina):
+    - IoU >= 0.15: label/score do Qwen + bbox precisa do YOLOE (source="fused").
+    - Sem match: label/score do Qwen + bbox do próprio Qwen (source="qwen").
+
+  Etapa 4 — Verificação final por crop:
+    Para cada objeto fundido, envia o crop ao Qwen:
+    - Qwen confirma/corrige o label e retorna score de confiança.
+    - score < 0.6 → objeto descartado.
+
+  Etapa 5 — Ranking final:
+    score × (0.6 + 0.4 × centralidade) → top 5.
 """
 
 import json
@@ -37,17 +41,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from PIL import Image
 
-from system_instruction import (
-    SCENE_INSTRUCTION, JUDGE_INSTRUCTION,
-    SYSTEM_INSTRUCTION, SEQUENTIAL_INSTRUCTION,
-)
+from system_instruction import SYSTEM_INSTRUCTION, VERIFY_INSTRUCTION, SEQUENTIAL_INSTRUCTION
 from models import DetectedObject, BBox
-from services.yoloe import run_yoloe, run_yoloe_prompted, get_yoloe
-from services.qwen import (
-    parse_scene_response, parse_judge_response,
-    parse_qwen_response, parse_qwen_refine_response,
-)
-from services.fusion import serialize_detections
+from services.yoloe import run_yoloe, get_yoloe
+from services.qwen import parse_qwen_response, parse_verify_response, parse_qwen_refine_response
+from services.fusion import fuse_by_iou, serialize_detections
 from utils.image import resize_base64_image, b64_to_pil, pil_to_b64
 
 app = FastAPI()
@@ -68,7 +66,7 @@ async def startup_event():
         raise
 
 VLLM_URL   = os.getenv("VLLM_URL",   "http://vllm:8000") + "/v1/chat/completions"
-VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
 
 
 # ──────────────────────────────────────────────
@@ -87,9 +85,20 @@ class PromptSys(BaseModel):
 # Constantes
 # ──────────────────────────────────────────────
 
-_MIN_AREA = 0.005   # < 0.5% da imagem → ruído
-_MAX_AREA = 0.75    # > 75% da imagem → fundo
-_CROP_PADDING = 0.05
+# Área normalizada mínima para ser considerado objeto de foreground relevante.
+# Objetos menores que isso são provavelmente detalhes de fundo ou foco secundário.
+_MIN_FOREGROUND_AREA = 0.015   # 1.5 % da imagem
+
+# Área máxima: bbox que cobre mais de 75% da imagem é provavelmente a cena inteira.
+_MAX_FOREGROUND_AREA = 0.75
+
+# Objetos abaixo de _SMALL_AREA E com centralidade abaixo de _SMALL_CENTRALITY
+# são descartados como objetos periféricos de fundo sem foco.
+_SMALL_AREA       = 0.03    # 3 % — pequeno mas não microscópico
+_SMALL_CENTRALITY = 0.25    # muito periférico (canto da imagem)
+
+_CROP_PADDING  = 0.05
+_IOI_THRESHOLD = 0.15   # IoU mínimo para considerar match Qwen↔YOLOE
 
 
 # ──────────────────────────────────────────────
@@ -101,14 +110,34 @@ def _bbox_area(bbox: BBox) -> float:
 
 
 def _centrality(bbox: BBox) -> float:
-    """1.0 = centro da imagem, 0.0 = canto."""
+    """1.0 = centro, 0.0 = canto."""
     cx = (bbox.x1 + bbox.x2) / 2
     cy = (bbox.y1 + bbox.y2) / 2
     return max(0.0, 1.0 - 2 * max(abs(cx - 0.5), abs(cy - 0.5)))
 
 
+def _is_foreground(obj: DetectedObject) -> bool:
+    """
+    Retorna True se o objeto provavelmente é um objeto de primeiro plano relevante.
+
+    Descarta:
+    - Objetos com área < 1.5% (ruído ou detalhe mínimo).
+    - Objetos com área > 75% (a cena/fundo inteiro).
+    - Objetos pequenos (< 3%) E muito periféricos (centralidade < 0.25):
+      provavelmente são objetos de fundo que o usuário não está focando.
+    """
+    area = _bbox_area(obj.bbox)
+    if area < _MIN_FOREGROUND_AREA:
+        return False
+    if area > _MAX_FOREGROUND_AREA:
+        return False
+    if area < _SMALL_AREA and _centrality(obj.bbox) < _SMALL_CENTRALITY:
+        return False
+    return True
+
+
 def _crop_object(img: Image.Image, bbox: BBox) -> Image.Image:
-    """Crop com padding, sem ultrapassar os limites da imagem."""
+    """Crop com padding de 5%, sem ultrapassar os limites da imagem."""
     w, h = img.size
     pad_x = (bbox.x2 - bbox.x1) * _CROP_PADDING
     pad_y = (bbox.y2 - bbox.y1) * _CROP_PADDING
@@ -123,26 +152,20 @@ def _crop_object(img: Image.Image, bbox: BBox) -> Image.Image:
 # Chamadas ao vLLM
 # ──────────────────────────────────────────────
 
-async def _call_scene(client: httpx.AsyncClient, image_b64: str) -> dict:
-    """
-    Etapa 1a: Qwen identifica objetos centrais + quantidades na imagem completa.
-    Não gera bboxes — apenas interpretação semântica.
-    """
+async def _call_qwen(client: httpx.AsyncClient, image_b64: str, system: str) -> dict:
+    """Chamada ao Qwen com imagem completa."""
     response = await client.post(
         VLLM_URL,
         json={
             "model": VLLM_MODEL,
             "messages": [
-                {"role": "system", "content": SCENE_INSTRUCTION},
+                {"role": "system", "content": system},
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                "Look at this image. List the central foreground objects "
-                                "and how many of each you can see. Ignore background elements."
-                            ),
+                            "text": "Detect all visible foreground objects with tight bounding boxes.",
                         },
                         {
                             "type": "image_url",
@@ -151,43 +174,37 @@ async def _call_scene(client: httpx.AsyncClient, image_b64: str) -> dict:
                     ],
                 },
             ],
-            "max_tokens": 256,
         },
     )
     result = response.json()
-    print(f"[Scene] status={response.status_code} | {result}")
+    print(f"[Qwen] status={response.status_code}")
     return result
 
 
-async def _call_judge(
+async def _call_verify(
     client: httpx.AsyncClient,
     crop_b64: str,
-    central_objects: list[dict],
-    candidate_idx: int,
+    hint_label: str,
 ) -> dict:
     """
-    Etapa 2: Qwen julga se o crop de um candidato do YOLOE corresponde a algum
-    dos objetos centrais identificados na Etapa 1.
+    Etapa 4: Qwen verifica o label de um crop já fundido.
+    Recebe o crop isolado + hint do label atual para contexto.
     """
-    expected_list = ", ".join(
-        f'"{o["label"]}" (×{o["count"]})' for o in central_objects
-    )
     response = await client.post(
         VLLM_URL,
         json={
             "model": VLLM_MODEL,
             "messages": [
-                {"role": "system", "content": JUDGE_INSTRUCTION},
+                {"role": "system", "content": VERIFY_INSTRUCTION},
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
                             "text": (
-                                f"Expected central objects in the scene: [{expected_list}]\n\n"
-                                "Does this crop show one of those objects? "
-                                "The object must be the dominant element — "
-                                "not just background or a supporting surface."
+                                f'This object was initially labeled "{hint_label}". '
+                                "Verify if that is correct, or correct it. "
+                                "What is this object?"
                             ),
                         },
                         {
@@ -201,33 +218,7 @@ async def _call_judge(
         },
     )
     result = response.json()
-    print(f"[Judge #{candidate_idx}] status={response.status_code} | {result}")
-    return result
-
-
-async def _call_vllm_legacy(
-    client: httpx.AsyncClient, image_b64: str, system: str
-) -> dict:
-    """Chamada genérica legada ao Qwen (endpoints /detection e /detection/sys_prompt)."""
-    response = await client.post(
-        VLLM_URL,
-        json={
-            "model": VLLM_MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analyze this image and detect foreground objects."},
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                    ],
-                },
-            ],
-        },
-    )
-    result = response.json()
-    print(f"vLLM status={response.status_code} | response={result}")
+    print(f"[Verify] status={response.status_code} | hint='{hint_label}'")
     return result
 
 
@@ -248,7 +239,7 @@ async def _call_vllm_sequential(
     import json as _json
     filtered = [
         (i, obj) for i, obj in enumerate(yoloe_objects)
-        if _bbox_area(obj.bbox) >= _MIN_AREA
+        if _bbox_area(obj.bbox) >= _MIN_FOREGROUND_AREA
     ] or list(enumerate(yoloe_objects))
     clean_b64 = pil_to_b64(img)
     payload = _json.dumps(
@@ -359,82 +350,77 @@ def _select_best_matches(
 @app.post("/detection/fused")
 async def detection_fused(body: Prompt) -> dict:
     """
-    Pipeline semântico principal — Qwen coordena, YOLOE guiado refina.
+    Pipeline principal: Qwen + YOLOE-zero paralelo → fusão IoU → verificação de crop.
 
-    Etapa 1 — Qwen analisa a cena:
-      Identifica objetos centrais + quantidades + gera prompts em inglês.
-      Ex: {"label": "carregador", "count": 1,
-           "prompts": ["charger", "wall charger", "power adapter", ...]}
-
-    Etapa 2 — YOLOE com text prompts:
-      Usa os prompts ingleses do Qwen para guiar a detecção → bboxes precisas
-      e semanticamente alinhadas com o que o Qwen identificou.
-
-    Etapa 3 — Julgamento paralelo:
-      Para cada crop do YOLOE, Qwen julga: corresponde a um objeto central?
-
-    Etapa 4 — Seleção:
-      Para cada objeto central (respeitando count), seleciona os N melhores
-      candidatos aprovados, com dedup por IoU.
+    Etapa 1: Qwen e YOLOE rodam em paralelo.
+    Etapa 2: Filtros de foreground (área + centralidade).
+    Etapa 3: Fusão IoU — YOLOE refina bboxes do Qwen quando há match.
+    Etapa 4: Qwen verifica cada crop → corrige label + score de confiança.
+    Etapa 5: Ranking por score × centralidade → top 5.
     """
     image_b64 = resize_base64_image(body.image)
     img = b64_to_pil(image_b64)
+    img_size = img.size  # (width, height) para normalizar coords pixel
 
     loop = asyncio.get_event_loop()
 
-    # ── Etapa 1: Qwen identifica cena + gera prompts ──
+    # ── Etapa 1: Qwen e YOLOE em paralelo ──
     async with httpx.AsyncClient(timeout=120.0) as client:
-        scene_response = await _call_scene(client, image_b64)
+        qwen_task  = _call_qwen(client, image_b64, SYSTEM_INSTRUCTION)
+        yoloe_task = loop.run_in_executor(None, run_yoloe, img)
+        qwen_response, yoloe_objects = await asyncio.gather(qwen_task, yoloe_task)
 
-    central_objects = parse_scene_response(scene_response)
-    print(f"Objetos centrais: {central_objects}")
+    qwen_objects = parse_qwen_response(qwen_response, img_size=img_size)
+    print(f"Qwen:  {len(qwen_objects)} objeto(s)")
+    print(f"YOLOE: {len(yoloe_objects)} candidato(s)")
 
-    if not central_objects:
-        print("Qwen não identificou objetos centrais na cena.")
+    if not qwen_objects:
         return serialize_detections([], too_many=False)
 
-    # Coleta todos os prompts em inglês gerados pelo Qwen
-    all_prompts = []
-    for obj in central_objects:
-        for p in obj.get("prompts", []):
-            if p not in all_prompts:
-                all_prompts.append(p)
+    # ── Etapa 2: Filtros de foreground ──
+    qwen_filtered = [o for o in qwen_objects if _is_foreground(o)]
+    if not qwen_filtered:
+        print("Todos os objetos do Qwen foram filtrados como fundo/pequenos — usando todos")
+        qwen_filtered = qwen_objects
 
-    print(f"Prompts para YOLOE: {all_prompts}")
+    yoloe_filtered = [o for o in yoloe_objects if _is_foreground(o)]
+    print(f"Após filtro foreground — Qwen: {len(qwen_filtered)}, YOLOE: {len(yoloe_filtered)}")
 
-    # ── Etapa 2: YOLOE guiado pelos prompts do Qwen ──
-    yoloe_objects = await loop.run_in_executor(
-        None, run_yoloe_prompted, img, all_prompts
-    )
-    print(f"YOLOE (prompted): {len(yoloe_objects)} candidato(s)")
+    # ── Etapa 3: Fusão IoU ──
+    # YOLOE refina bboxes do Qwen quando há match (IoU >= 0.15)
+    fused = fuse_by_iou(qwen_filtered, yoloe_filtered, iou_threshold=_IOI_THRESHOLD)
+    print(f"Pós-fusão: {len(fused)} objeto(s)")
 
-    if not yoloe_objects:
-        print("YOLOE não detectou candidatos com os prompts fornecidos.")
-        return serialize_detections([], too_many=False)
-
-    # Filtra por área
-    candidates = [
-        o for o in yoloe_objects
-        if _MIN_AREA <= _bbox_area(o.bbox) <= _MAX_AREA
-    ] or yoloe_objects
-
-    print(f"Candidatos após filtro de área: {len(candidates)}")
-
-    # ── Etapa 3: Qwen julga cada candidato em paralelo ──
+    # ── Etapa 4: Verificação de crop pelo Qwen (paralelo) ──
     async with httpx.AsyncClient(timeout=120.0) as client:
-        judge_tasks = [
-            _call_judge(client, pil_to_b64(_crop_object(img, c.bbox)), central_objects, i)
-            for i, c in enumerate(candidates)
+        verify_tasks = [
+            _call_verify(client, pil_to_b64(_crop_object(img, obj.bbox)), obj.label)
+            for obj in fused
         ]
-        judge_responses = await asyncio.gather(*judge_tasks)
+        verify_responses = await asyncio.gather(*verify_tasks)
 
-    judgments = [parse_judge_response(r) for r in judge_responses]
+    verified: list[DetectedObject] = []
+    for obj, vresp in zip(fused, verify_responses):
+        label, score = parse_verify_response(vresp)
+        if not label:
+            print(f"Descartado na verificação: '{obj.label}' (score baixo)")
+            continue
+        verified.append(DetectedObject(
+            label=label,
+            score=score,
+            bbox=obj.bbox,
+            source=obj.source,
+            yoloe_conf=obj.yoloe_conf,
+        ))
 
-    approved_count = sum(1 for m, _ in judgments if m is not None)
-    print(f"Candidatos aprovados pelo Qwen: {approved_count}/{len(candidates)}")
+    print(f"Após verificação: {len(verified)} objeto(s)")
 
-    # ── Etapa 4: Seleção dos melhores matches ──
-    final = _select_best_matches(central_objects, candidates, judgments)
+    # ── Etapa 5: Ranking final ──
+    final = sorted(
+        verified,
+        key=lambda o: o.score * (0.6 + 0.4 * _centrality(o.bbox)),
+        reverse=True,
+    )[:5]
 
     print(f"Resultado final: {len(final)} objeto(s)")
     return serialize_detections(final)
@@ -448,8 +434,8 @@ async def detection(body: Prompt) -> dict:
     async with httpx.AsyncClient(timeout=120.0) as client:
         return serialize_detections(
             parse_qwen_response(
-                await _call_vllm_legacy(client, image_b64, SYSTEM_INSTRUCTION),
-                img_size=img.size,  # (width, height) para normalizar coords em pixel
+                await _call_qwen(client, image_b64, SYSTEM_INSTRUCTION),
+                img_size=img.size,
             ),
             too_many=False,
         )
@@ -463,7 +449,7 @@ async def detection_sys(body: PromptSys) -> dict:
     async with httpx.AsyncClient(timeout=120.0) as client:
         return serialize_detections(
             parse_qwen_response(
-                await _call_vllm_legacy(client, image_b64, body.prompt),
+                await _call_qwen(client, image_b64, body.prompt),
                 img_size=img.size,
             ),
             too_many=False,
