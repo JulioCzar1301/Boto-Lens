@@ -18,7 +18,8 @@ Arquitetura /detection/fused:
   5. Envia AMBAS as imagens ao Qwen em paralelo via asyncio.gather.
   6. Qwen usa o contexto para validar se o bbox isola um único objeto real.
   7. Score < 60% → descartado.
-  8. Deduplicação pós-Qwen: IoU > 0.3 → mantém maior score.
+  8. Deduplicação pós-Qwen com contenção: bbox menor dentro de maior → mantém menor (mais preciso).
+  8b. Ranking final por score × centralidade.
   9. Retorna top 5.
 """
 
@@ -77,8 +78,6 @@ class PromptSys(BaseModel):
 _MIN_AREA      = 0.005
 _MAX_AREA      = 0.75
 _CROP_PADDING  = 0.05
-_CONTAINMENT_T = 0.70
-_IOU_DEDUP_T   = 0.30
 _BOX_COLOR     = (255, 50, 50)   # vermelho para o bbox na imagem completa
 _BOX_WIDTH     = 4               # espessura do retângulo em pixels
 
@@ -104,29 +103,70 @@ def _containment(a: BBox, b: BBox) -> float:
     return 0.0 if area_a == 0 else _intersection_area(a, b) / area_a
 
 
-def _filter_contained(objects: list[DetectedObject]) -> list[DetectedObject]:
-    """Remove bboxes que são sub-partes de outras (contenção ≥ 70%)."""
-    to_remove = set()
-    for i, a in enumerate(objects):
-        for j, b in enumerate(objects):
-            if i == j or j in to_remove:
-                continue
-            if (_containment(a.bbox, b.bbox) >= _CONTAINMENT_T and
-                    _bbox_area(a.bbox) < _bbox_area(b.bbox)):
-                to_remove.add(i)
-                print(f"Contenção: candidato {i} descartado (sub-parte de {j})")
-                break
-    return [o for i, o in enumerate(objects) if i not in to_remove]
+def _centrality(bbox: BBox) -> float:
+    """Centralidade: 1.0 quando o centro do bbox coincide com o centro da imagem."""
+    cx = (bbox.x1 + bbox.x2) / 2
+    cy = (bbox.y1 + bbox.y2) / 2
+    return max(0.0, 1.0 - 2 * max(abs(cx - 0.5), abs(cy - 0.5)))
 
 
 def _deduplicate_results(objects: list[DetectedObject]) -> list[DetectedObject]:
-    """IoU pós-Qwen: se > 0.3, mantém o de maior score."""
+    """
+    Deduplicação pós-Qwen com lógica de contenção.
+
+    - Se containment(A em B) > 0.5 ou containment(B em A) > 0.5:
+        → contenção: mantém o bbox MENOR (mais preciso).
+    - Se IoU > 0.20 sem contenção clara:
+        → mantém o de maior score.
+    """
+    sorted_objs = sorted(objects, key=lambda o: o.score, reverse=True)
     kept: list[DetectedObject] = []
-    for obj in sorted(objects, key=lambda o: o.score, reverse=True):
-        if any(obj.bbox.iou(k.bbox) > _IOU_DEDUP_T for k in kept):
-            print(f"Dedup: '{obj.label}' (score={obj.score:.2f}) descartado por sobreposição")
-        else:
-            kept.append(obj)
+
+    for obj in sorted_objs:
+        discard_obj = False
+        to_remove_from_kept: list[int] = []
+
+        for i, k in enumerate(kept):
+            obj_area = _bbox_area(obj.bbox)
+            k_area   = _bbox_area(k.bbox)
+            obj_in_k = _containment(obj.bbox, k.bbox)   # fração de obj dentro de k
+            k_in_obj = _containment(k.bbox, obj.bbox)   # fração de k dentro de obj
+
+            has_containment = obj_in_k > 0.5 or k_in_obj > 0.5
+            has_iou         = obj.bbox.iou(k.bbox) > 0.20
+
+            if has_containment or has_iou:
+                if has_containment:
+                    if obj_area < k_area:
+                        # obj é o menor/mais preciso → remove k (maior/genérico)
+                        to_remove_from_kept.append(i)
+                        print(f"Dedup contenção: '{k.label}' removido (área={k_area:.3f})"
+                              f" → mantém '{obj.label}' (área={obj_area:.3f})")
+                    else:
+                        # k é o menor/mais preciso → descarta obj
+                        discard_obj = True
+                        print(f"Dedup contenção: '{obj.label}' descartado (área={obj_area:.3f})"
+                              f" → mantém '{k.label}' (área={k_area:.3f})")
+                        break
+                else:
+                    # Sobreposição por IoU sem contenção clara → maior score vence
+                    if obj.score > k.score:
+                        to_remove_from_kept.append(i)
+                        print(f"Dedup IoU: '{k.label}' removido (score={k.score:.2f})"
+                              f" → mantém '{obj.label}' (score={obj.score:.2f})")
+                    else:
+                        discard_obj = True
+                        print(f"Dedup IoU: '{obj.label}' descartado (score={obj.score:.2f})")
+                        break
+
+        if discard_obj:
+            continue
+
+        for i in sorted(to_remove_from_kept, reverse=True):
+            kept.pop(i)
+
+        kept.append(obj)
+
     return kept
 
 
@@ -305,9 +345,10 @@ async def detection_fused(body: Prompt) -> dict:
 
     Filtros:
       1. Área: 0.5% ≤ área ≤ 75%
-      2. Contenção: bbox ≥70% dentro de outra maior → sub-parte → descartado
-      3. Qwen com contexto (imagem anotada + crop): score < 60% → descartado
-      4. Dedup pós-Qwen: IoU > 0.3 → mantém maior score
+      2. Qwen com contexto (imagem anotada + crop): score < 60% → descartado
+      3. Dedup pós-Qwen com contenção: bbox menor dentro de maior → mantém menor
+         Ou IoU > 0.20 → mantém maior score
+      4. Ranking final: score × (0.6 + 0.4 × centralidade)
     """
     image_b64 = resize_base64_image(body.image)
     img = b64_to_pil(image_b64)
@@ -320,9 +361,8 @@ async def detection_fused(body: Prompt) -> dict:
 
     candidates = [o for o in yoloe_objects if _MIN_AREA <= _bbox_area(o.bbox) <= _MAX_AREA] \
                  or yoloe_objects
-    candidates = _filter_contained(candidates)
 
-    print(f"YOLOE: {len(yoloe_objects)} → {len(candidates)} candidatos após filtros")
+    print(f"YOLOE: {len(yoloe_objects)} → {len(candidates)} candidatos após filtro de área")
 
     if not candidates:
         return serialize_detections([], too_many=False)
@@ -333,7 +373,9 @@ async def detection_fused(body: Prompt) -> dict:
         )
 
     classified = [r for r in results if r is not None]
-    final = _deduplicate_results(classified)[:5]
+    deduped    = _deduplicate_results(classified)
+    # Ranking final: score do Qwen × bônus de centralidade
+    final = sorted(deduped, key=lambda o: o.score * (0.6 + 0.4 * _centrality(o.bbox)), reverse=True)[:5]
 
     print(f"Resultado final: {len(final)} objeto(s)")
     return serialize_detections(final)
