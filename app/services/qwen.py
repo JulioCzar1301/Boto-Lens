@@ -37,29 +37,21 @@ def _extract_json(raw: str) -> str:
 
 def _try_fix_json(raw: str) -> str:
     """
-    Repara JSON malformado comum do Qwen2.5-VL/7B:
-    - "bbox_norm": {"x1": 23, 274, 206, 578}  → chaves faltando em y1/x2/y2
-    - "bbox_norm": {107, 244, 212, 352}        → todas as chaves faltando
-    - "x2": 195, 260,                          → valor extra após coord
-    - trailing commas antes de } ou ]
+    Repara JSON malformado comum do Qwen2.5-VL/7B.
+    Estratégia robusta: para qualquer bloco "bbox_norm": {...},
+    extrai os 4 primeiros números e reconstrói o objeto corretamente,
+    independente do formato das chaves.
     """
-    # Caso 1: bbox com x1 mas sem chaves para y1/x2/y2
-    # ex: "bbox_norm": {"x1": 23, 274, 206, 578}
-    raw = re.sub(
-        r'"bbox_norm":\s*\{\s*"x1":\s*([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\s*\}',
-        r'"bbox_norm": {"x1": \1, "y1": \2, "x2": \3, "y2": \4}',
-        raw,
-    )
-    # Caso 2: bbox sem nenhuma chave
-    # ex: "bbox_norm": {107, 244, 212, 352}
-    raw = re.sub(
-        r'"bbox_norm":\s*\{\s*([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\s*\}',
-        r'"bbox_norm": {"x1": \1, "y1": \2, "x2": \3, "y2": \4}',
-        raw,
-    )
-    # Valor numérico extra após coordenada (ex: "x2": 195, 260,)
-    raw = re.sub(r'("x[12]":\s*[\d.]+),\s*[\d.]+\s*,', r'\1,', raw)
-    raw = re.sub(r'("y[12]":\s*[\d.]+),\s*[\d.]+\s*,', r'\1,', raw)
+    def fix_bbox(m: re.Match) -> str:
+        content = m.group(1)
+        # Remove strings entre aspas (nomes de chaves como "x1", "x1=", etc.)
+        content = re.sub(r'"[^"]*"\s*:?\s*', '', content)
+        nums = re.findall(r"[\d.]+", content)
+        if len(nums) >= 4:
+            return f'"bbox_norm": {{"x1": {nums[0]}, "y1": {nums[1]}, "x2": {nums[2]}, "y2": {nums[3]}}}'
+        return m.group(0)  # não altera se não encontrar 4 números
+
+    raw = re.sub(r'"bbox_norm":\s*\{([^}]*)\}', fix_bbox, raw, flags=re.DOTALL)
     # Trailing comma antes de } ou ]
     raw = re.sub(r',\s*([}\]])', r'\1', raw)
     return raw
