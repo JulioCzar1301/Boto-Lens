@@ -89,15 +89,14 @@ jobs:
             git checkout -- .
             git pull origin main
 
-            # Tenta subir o vllm, mas NÃO aborta o deploy se falhar.
-            # Isso garante que a API sempre seja atualizada, mesmo que o
-            # nvidia-container-toolkit ainda não esteja instalado no host.
-            docker compose up -d --no-recreate vllm || \
-              echo "AVISO: vllm nao subiu (verifique nvidia-container-toolkit). Continuando deploy da API..."
+            # Derruba todos os containers e remove órfãos de deploys anteriores
+            docker compose down --remove-orphans
 
-            # Atualiza a API independente do estado do vllm
+            # Puxa a imagem mais recente da API
             docker compose pull api
-            docker compose up -d --no-deps --force-recreate api
+
+            # Sobe vllm e api juntos
+            docker compose up -d vllm api
 
             docker image prune -f
 
