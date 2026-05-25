@@ -223,6 +223,11 @@ async def _call_qwen(client: httpx.AsyncClient, image_b64: str, system: str) -> 
     )
     result = response.json()
     print(f"[Qwen] status={response.status_code}")
+    try:
+        raw = result["choices"][0]["message"]["content"]
+        print(f"[Qwen raw] {raw[:500]}")
+    except Exception:
+        pass
     return result
 
 
@@ -332,7 +337,11 @@ async def detection_fused(body: Prompt) -> dict:
     print(f"YOLOE: {len(yoloe_objects)} candidato(s)")
 
     if not qwen_objects:
-        return serialize_detections([], too_many=False)
+        # Fallback: Qwen falhou ou não detectou nada — usa YOLOE sozinho
+        print("Qwen sem objetos — fallback para YOLOE")
+        yoloe_fallback = [o for o in yoloe_objects if _is_foreground(o)] or yoloe_objects
+        yoloe_fallback = sorted(yoloe_fallback, key=lambda o: o.score * (0.6 + 0.4 * _centrality(o.bbox)), reverse=True)[:5]
+        return serialize_detections(yoloe_fallback, too_many=False)
 
     # ── Etapa 2: Filtros de foreground ──
     qwen_filtered = [o for o in qwen_objects if _is_foreground(o)]

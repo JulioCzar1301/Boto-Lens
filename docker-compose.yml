@@ -20,7 +20,7 @@ services:
       - "--max-num-seqs"
       - "4"
       - "--gpu-memory-utilization"
-      - "0.20"
+      - "0.50"
     deploy:
       resources:
         reservations:

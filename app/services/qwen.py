@@ -14,7 +14,7 @@ from models import DetectedObject, BBox
 
 log = logging.getLogger(__name__)
 
-VERIFY_SCORE_THRESHOLD = 0.6  # Crops abaixo desse score são descartados na verificação
+VERIFY_SCORE_THRESHOLD = 0.5  # Crops abaixo desse score são descartados na verificação
 
 
 # ─────────────────────────────────────────────────────────────────────────────
