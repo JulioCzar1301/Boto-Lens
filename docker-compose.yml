@@ -12,7 +12,7 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     command:
-      - "Qwen/Qwen2.5-VL-14B-Instruct"
+      - "Qwen/Qwen2.5-VL-7B-Instruct"
       - "--dtype"
       - "bfloat16"
       - "--max-model-len"
@@ -45,7 +45,7 @@ services:
       - "8001:8001"
     environment:
       - VLLM_URL=http://vllm:8000
-      - VLLM_MODEL=Qwen/Qwen2.5-VL-14B-Instruct
+      - VLLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
     depends_on:
       vllm:
         condition: service_healthy
