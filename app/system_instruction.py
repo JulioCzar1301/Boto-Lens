@@ -49,6 +49,8 @@ LABELING RULES:
 - Use short natural object names.
 - Do not include colors, descriptions, positions, or sentences in the label.
 - Examples: "carregador", "cabo", "celular", "notebook", "garrafa", "controle remoto", "chave", "livro", "caneta".
+- If you see an open laptop (screen + keyboard together as one device), always label it "notebook", never "teclado".
+- Only label something "teclado" if it is a standalone external keyboard, not attached to a laptop.
 
 SELECTION RULES:
 - Return up to 5 visible foreground objects.
@@ -104,6 +106,8 @@ LABEL rules:
 - Brazilian Portuguese only, 1–4 words, natural object name.
 - No colors, positions, descriptions, or adjectives.
 - Examples: "carregador", "notebook", "garrafa", "celular", "controle remoto", "copo", "mouse".
+- If the crop shows a laptop (screen visible or keyboard attached to a base/hinge), label it "notebook", not "teclado".
+- Only use "teclado" for a standalone external keyboard without a screen.
 
 SCORE rules (0.0–1.0):
 - 0.8–1.0: clearly one identifiable object fills most of the crop.
