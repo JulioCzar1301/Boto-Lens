@@ -29,13 +29,20 @@ LABEL:
 
 Return up to 5 objects. Score >= 0.3 only.
 
-OUTPUT FORMAT:
+OUTPUT FORMAT (follow exactly):
 {
   "objects": [
-    {"label": "nome", "score": 0.9, "bbox_norm": {"x1": 0.0, "y1": 0.0, "x2": 0.0, "y2": 0.0}}
+    {
+      "label": "nome",
+      "score": 0.9,
+      "bbox_norm": {"x1": 0.05, "y1": 0.10, "x2": 0.45, "y2": 0.80}
+    }
   ],
   "too_many_objects": false
 }
+
+CRITICAL: bbox_norm must always have exactly 4 named keys: "x1", "y1", "x2", "y2".
+Do NOT write: {"x1": 23, 274, 206, 578} — always write: {"x1": 0.05, "y1": 0.27, "x2": 0.45, "y2": 0.80}
 
 If nothing found: {"objects": [], "too_many_objects": false}
 """
