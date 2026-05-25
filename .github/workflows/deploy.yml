@@ -79,7 +79,7 @@ jobs:
           proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
           proxy_port: ${{ secrets.SSH_PORT }}
 
-          envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH
+          envs: GHCR_TOKEN,GITHUB_ACTOR,DEPLOY_PATH,HF_TOKEN
           script: |
             set -e
 
@@ -95,8 +95,13 @@ jobs:
             # Puxa a imagem mais recente da API
             docker compose pull api
 
-            # Sobe vllm e api juntos
-            docker compose up -d vllm api
+            # Sobe vllm e api juntos (HF_TOKEN exportado para o docker compose)
+            export HF_TOKEN="$HF_TOKEN"
+            docker compose up -d vllm api || {
+              echo "==== LOGS DO VLLM ===="
+              docker logs vllm-server --tail 50 || true
+              exit 1
+            }
 
             docker image prune -f
 
@@ -105,3 +110,4 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
