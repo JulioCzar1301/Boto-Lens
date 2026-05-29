@@ -1,76 +1,60 @@
 @startuml architecture
 !define EXTERNAL #FFE4E1
 !define INTERNAL #E1F5FE
-!define SERVICE #FFF9E6
+!define SERVICE  #FFF9E6
 
 skinparam backgroundColor #FAFAFA
-skinparam componentBackgroundColor INTERNAL
 skinparam component {
   BorderColor #0277BD
   BackgroundColor INTERNAL
 }
 
-package "Aplicação FastAPI" {
-  component "API Server\n(main.py)" as API
-  
-  package "Services" {
-    component "Qwen Service\n(parse_qwen_response)" as QwenSvc
-    component "YOLOE Service\n(run_yoloe)" as YoloeSvc
-    component "Fusion Service\n(fuse_by_iou)" as FusionSvc
+package "Aplicação FastAPI (app/)" {
+  component "main.py\n(Endpoints & Pipeline)" as API
+
+  package "schemas.py" {
+    component "Prompt\nPromptSys" as Schemas
   }
-  
-  package "Utils" {
-    component "Image Utils\n(resize, convert)" as ImageUtils
+
+  package "config.py" {
+    component "VLLM_URL / MODEL\nThresholds & Constantes" as Config
   }
-  
-  package "Models" {
-    component "BBox\nDetectedObject" as ModelComponents
+
+  package "services/" {
+    component "qwen.py\ncall_qwen, call_verify\ncall_vllm_sequential\nparse_*" as QwenSvc
+    component "yoloe.py\nrun_yoloe\nget_yoloe (singleton)" as YoloeSvc
+    component "fusion.py\nfuse_by_iou\nserialize_detections" as FusionSvc
+  }
+
+  package "utils/" {
+    component "image.py\nresize, b64_to_pil\npil_to_b64, draw_*" as ImageUtils
+    component "geometry.py\nbbox_area, centrality\niou, containment\nis_foreground\nremove_subparts\ncrop_object" as GeomUtils
+  }
+
+  package "models.py" {
+    component "BBox\nDetectedObject" as Models
+  }
+
+  package "system_instruction.py" {
+    component "SYSTEM_INSTRUCTION\nVERIFY_INSTRUCTION\nSEQUENTIAL_INSTRUCTION" as Instructions
   }
 }
 
 package "Serviços Externos" {
-  component "vLLM Server\nQwen3-VL-8B" as VLLM <<EXTERNAL>>
+  component "vLLM Server\nQwen2.5-14B-Instruct" as VLLM <<EXTERNAL>>
   component "YOLOE Model\n(yoloe-11l-seg-pf.pt)" as YoloeModel <<EXTERNAL>>
 }
 
-package "Cliente" {
-  actor "Cliente" as Client
-}
+actor "Cliente" as Client
 
-' Conexões
-Client --> API: POST /detection/fused\n(image: base64)
-
-API --> ImageUtils: resize_base64_image\nb64_to_pil
-ImageUtils --> API: image processada
-
-API --> QwenSvc: parse_qwen_response
-API --> YoloeSvc: run_yoloe
-
-QwenSvc --> VLLM: POST /v1/chat/completions\n(image, system_prompt)
-VLLM --> QwenSvc: JSON com objetos
-
-YoloeSvc --> YoloeModel: predict(image)
-YoloeModel --> YoloeSvc: detecções com scores
-
-QwenSvc --> ModelComponents: cria DetectedObject
-YoloeSvc --> ModelComponents: cria DetectedObject
-
-API --> FusionSvc: fuse_by_iou\n(qwen_objects, yoloe_objects)
-FusionSvc --> ModelComponents: calcula IoU entre BBoxes
-FusionSvc --> API: objetos fusionados
-
-API --> Client: JSON response\n(fused objects)
-
-note right of API
-  Executa Qwen e YOLOE
-  em paralelo com asyncio
-  para melhor performance
-end note
-
-note right of FusionSvc
-  IoU threshold = 0.15
-  Usa labels do Qwen +
-  bboxes do YOLOE
-end note
-
-@enduml
+' Fluxo principal
+Client     --> API          : POST /detection/fused\n(image: base64)
+API        --> Schemas      : valida payload
+API        --> Config       : lê thresholds
+API        --> ImageUtils   : resize + b64_to_pil
+API        --> QwenSvc      : call_qwen (paralelo)
+API        --> YoloeSvc     : run_yoloe (paralelo)
+QwenSvc    --> Instructions : SYSTEM_INSTRUCTION / VERIFY_INSTRUCTION
+QwenSvc    --> VLLM         : POST /v1/chat/completions
+VLLM       --> QwenSvc      : JSON com objetos / label+score
+YoloeSvc   --> YoloeModel   :

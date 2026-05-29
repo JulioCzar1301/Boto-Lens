@@ -3,27 +3,27 @@ skinparam backgroundColor #FAFAFA
 skinparam classBackgroundColor #E1F5FE
 skinparam classBorderColor #0277BD
 
-' Classes de domínio
+' ── Domínio (models.py) ───────────────────────────────────────────────────────
 class BBox {
-  -x1: float
-  -y1: float
-  -x2: float
-  -y2: float
+  +x1: float
+  +y1: float
+  +x2: float
+  +y2: float
   +area(): float
   +iou(other: BBox): float
 }
 
 class DetectedObject {
-  -label: str
-  -score: float
-  -bbox: BBox
-  -source: str
-  -yoloe_conf: Optional[float]
+  +label: str
+  +score: float
+  +bbox: BBox
+  +source: str
+  +yoloe_conf: Optional[float]
 }
 
 DetectedObject *-- BBox : contém
 
-' Schemas Pydantic
+' ── Schemas Pydantic (schemas.py) ────────────────────────────────────────────
 class Prompt {
   +image: str
 }
@@ -33,75 +33,32 @@ class PromptSys {
   +prompt: str
 }
 
-' Services
-class FastAPI {
-  +post(route, body): dict
-  +get(route): dict
+' ── Serviços (services/) ─────────────────────────────────────────────────────
+class QwenService << (M,#FFFACD) services/qwen.py >> {
+  +call_qwen(client, image_b64, system): dict
+  +call_verify(client, crop_b64, hint_label): dict
+  +call_vllm_sequential(client, img, yoloe_objects): dict
+  +parse_qwen_response(response, img_size): List[DetectedObject]
+  +parse_verify_response(response): Tuple[str, float]
+  +parse_qwen_refine_response(response, yoloe_objects): List[DetectedObject]
+  -{static} _parse_json_robust(raw): dict
+  -{static} _try_fix_json(raw): str
+  -{static} _make_bbox(x1, y1, x2, y2, w, h): BBox
 }
 
-class QwenService {
-  +parse_qwen_response(response: dict): List[DetectedObject]
-  -_extract_json(raw: str): dict
-  -_validate_objects(data: dict): List[DetectedObject]
-}
-
-class YoloeService {
-  +run_yoloe(img: Image): List[DetectedObject]
+class YoloeService << (M,#FFFACD) services/yoloe.py >> {
   +get_yoloe(): YOLOE
-  -_normalize_bbox(xyxy, width, height): BBox
+  +run_yoloe(img): List[DetectedObject]
+  +run_yoloe_prompted(img, prompts): List[DetectedObject]
+  -{static} _boxes_to_objects(results, label_map, w, h): List[DetectedObject]
 }
 
-class FusionService {
-  +fuse_by_iou(qwen: List, yoloe: List): List[DetectedObject]
-  +serialize_detections(objects: List, too_many: bool): dict
-  -_match_by_iou(qobj, yoloe_objects): Tuple
+class FusionService << (M,#FFFACD) services/fusion.py >> {
+  +fuse_by_iou(qwen, yoloe, iou_threshold): List[DetectedObject]
+  +serialize_detections(objects, too_many): dict
 }
 
-class ImageUtils {
-  +resize_base64_image(b64: str): str
-  +b64_to_pil(b64: str): Image
-  -_decode_b64(b64: str): bytes
-}
-
-' Endpoints (métodos da API)
-class DetectionEndpoint {
-  +detection(body: Prompt): dict
-  +detection_sys(body: PromptSys): dict
-  +detection_fused(body: Prompt): dict
-  +health(): dict
-}
-
-' Relações
-FastAPI <|-- DetectionEndpoint : implementa
-
-DetectionEndpoint --> Prompt : recebe
-DetectionEndpoint --> PromptSys : recebe
-DetectionEndpoint --> ImageUtils : utiliza
-
-DetectionEndpoint --> QwenService : utiliza
-DetectionEndpoint --> YoloeService : utiliza
-DetectionEndpoint --> FusionService : utiliza
-
-QwenService --> DetectedObject : produz
-YoloeService --> DetectedObject : produz
-FusionService --> DetectedObject : consome/produz
-
-ImageUtils --> DetectedObject : suporta processamento
-
-note bottom of BBox
-  Coordenadas normalizadas
-  no intervalo [0, 1]
-end note
-
-note bottom of FusionService
-  Combina detecções via IoU
-  label/score vem do Qwen
-  bbox vem do YOLOE
-end note
-
-note bottom of YoloeService
-  Wrapper para ultralytics
-  Singleton pattern
-end note
-
-@enduml
+' ── Utilitários (utils/) ─────────────────────────────────────────────────────
+class ImageUtils << (U,#E8F5E9) utils/image.py >> {
+  +resize_base64_image(b64, max_side, quality): str
+  +b64

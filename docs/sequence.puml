@@ -2,74 +2,71 @@
 title Fluxo de Detecção com Fusão: POST /detection/fused
 
 actor Client as C
-participant "FastAPI\nAPI Server" as API
-participant "Image Utils\nUtils" as IMG
-participant "HTTP Client\nAsyncClient" as HTTP
-participant "vLLM Server\nQwen" as QWEN_SRV
-participant "YOLOE Service\nServices" as YOLOE
-participant "Fusion Service\nServices" as FUSION
-participant "Response\nSerialization" as SER
+participant "main.py\n(FastAPI)" as API
+participant "utils/image.py" as IMG
+participant "utils/geometry.py" as GEO
+participant "services/qwen.py" as QWEN
+participant "vLLM Server\n(Qwen2.5-14B)" as VLLM
+participant "services/yoloe.py" as YOLOE
+participant "services/fusion.py" as FUSION
 
-C ->> API: POST /detection/fused
+C ->> API: POST /detection/fused\n{image: base64}
 activate API
 
 API ->> IMG: resize_base64_image(image)
-activate IMG
-note over IMG: Redimensiona se\nnecessário (max 1024px)
-IMG -->> API: image_b64_resized
-deactivate IMG
+IMG -->> API: image_b64 redimensionada
 
 API ->> IMG: b64_to_pil(image_b64)
-activate IMG
-note over IMG: Converte para\nPIL Image
-IMG -->> API: img (PIL)
-deactivate IMG
+IMG -->> API: img: PIL.Image
 
-API ->> API: Inicia chamadas paralelas
-par Execução Paralela
-    API ->> HTTP: POST /v1/chat/completions (Qwen + image)
-    HTTP ->> QWEN_SRV: Processa imagem
-    QWEN_SRV -->> HTTP: choices: content JSON
-    HTTP -->> API: vllm_response
+== Etapa 1 — Paralelo ==
+
+par Execução paralela (asyncio.gather)
+    API ->> QWEN: call_qwen(client, image_b64, SYSTEM_INSTRUCTION)
+    QWEN ->> VLLM: POST /v1/chat/completions\n(imagem + system prompt)
+    VLLM -->> QWEN: choices[0].message.content (JSON)
+    QWEN -->> API: vllm_response
 else
-    API ->> YOLOE: run_yoloe(img)
-    YOLOE -->> API: yoloe_objects: List of DetectedObject
+    API ->> YOLOE: run_yoloe(img)\n[executor thread]
+    YOLOE -->> API: yoloe_objects: List[DetectedObject]
 end
-note over API: Qwen processa imagem\nYOLOE executa detecção\nAmbos executam em paralelo
 
-API ->> API: parse_qwen_response(vllm_response)
-note over API: Extrai JSON e valida\nobservações do Qwen
-API ->> API: qwen_objects: List of DetectedObject
+API ->> QWEN: parse_qwen_response(vllm_response, img_size)
+QWEN -->> API: qwen_objects: List[DetectedObject]
 
-API ->> FUSION: fuse_by_iou(qwen_objects, yoloe_objects)
+== Etapa 2 — Filtro de Foreground ==
+
+API ->> GEO: is_foreground(obj) para cada objeto
+note over GEO
+  Remove: área < 1.5% (ruído)
+  Remove: área > 75% (fundo)
+  Remove: pequeno + periférico
+end note
+GEO -->> API: qwen_filtered, yoloe_filtered
+
+== Etapa 3 — Fusão IoU ==
+
+API ->> FUSION: fuse_by_iou(qwen_filtered, yoloe_filtered, threshold=0.15)
 activate FUSION
-note over FUSION: IoU threshold = 0.15\nPara cada Qwen object:\nbusca melhor match YOLOE
-
 loop Para cada qwen_object
     FUSION ->> FUSION: calcula IoU com cada yoloe_bbox
-    alt IoU >= 0.15 e nao usado
-        FUSION ->> FUSION: cria objeto fusionado\nlabel+score Qwen + bbox YOLOE
+    alt IoU >= 0.15 e não usado
+        FUSION ->> FUSION: source="fused"\nlabel+score Qwen + bbox YOLOE
     else IoU < 0.15
-        FUSION ->> FUSION: mantem objeto Qwen
+        FUSION ->> FUSION: mantém objeto Qwen\nsource="qwen"
     end
 end
-
-FUSION -->> API: fused_objects: List of DetectedObject
+FUSION -->> API: fused: List[DetectedObject]
 deactivate FUSION
 
-API ->> SER: serialize_detections(fused_objects)
-activate SER
-note over SER: Formata para JSON\nresponse da API
-SER -->> API: objects e too_many_objects: false
-deactivate SER
+== Etapa 4 — Verificação de Crop (paralelo) ==
 
-API -->> C: HTTP 200
-deactivate API
-
-note over C, SER
-  Total: Qwen + YOLOE em paralelo
-  Fusao por IoU combina resultado
-  Resposta: objetos com melhor confianca
-end note
-
-@enduml
+par call_verify em paralelo para cada objeto
+    API ->> GEO: crop_object(img, bbox)
+    GEO -->> API: crop: PIL.Image
+    API ->> IMG: pil_to_b64(crop)
+    IMG -->> API: crop_b64
+    API ->> QWEN: call_verify(client, crop_b64, hint_label)
+    QWEN ->> VLLM: POST /v1/chat/completions\n(crop + VERIFY_INSTRUCTION)
+    VLLM -->> QWEN: {"label": ..., "score": ...}
+    QWEN -->> API: verif
